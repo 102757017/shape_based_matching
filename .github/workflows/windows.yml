@@ -93,15 +93,7 @@ jobs:
       - name: Check wheel contents
         run: |
           python -m pip install wheel
-          python -c "
-          import zipfile
-          import glob
-          wheels = glob.glob('dist/*.whl')
-          for wheel in wheels:
-              print(f'Contents of {wheel}:')
-              with zipfile.ZipFile(wheel, 'r') as z:
-                  for name in z.namelist():
-                      print(f'  {name}')
+          python -c "import zipfile; import glob; wheels = glob.glob('dist/*.whl'); [print(f'Contents of {wheel}:', *[f'  {name}' for name in zipfile.ZipFile(wheel).namelist()], sep='\n') for wheel in wheels]"
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
