@@ -34,8 +34,8 @@ class CMakeBuild(build_ext):
         cmake_args += [f'-DCMAKE_BUILD_TYPE={cfg}']
 
         if platform.system() == "Windows":
-            # 使用正确的 Visual Studio 生成器
-            # 在 GitHub Actions 中，使用较新版本的 Visual Studio
+            # 在 GitHub Actions 的 windows-latest 环境中使用正确的生成器
+            # 通常包含 Visual Studio 2022
             cmake_args += [
                 '-G', 'Visual Studio 17 2022',
                 '-A', 'x64'
@@ -55,10 +55,18 @@ class CMakeBuild(build_ext):
         print("CMake arguments:", cmake_args)
         print("Build directory:", self.build_temp)
         
-        # 运行 CMake 配置
-        subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
-        # 运行 CMake 构建
-        subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
+        try:
+            # 运行 CMake 配置
+            subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
+            # 运行 CMake 构建
+            subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
+        except subprocess.CalledProcessError as e:
+            # 如果失败，尝试不使用特定生成器，让 CMake 自动选择
+            print(f"CMake build failed with generator 'Visual Studio 17 2022', trying auto-detection...")
+            # 移除生成器参数
+            cmake_args = [arg for arg in cmake_args if not arg.startswith('-G') and arg != 'Visual Studio 17 2022']
+            subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
+            subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
 
 # setup(...) 部分保持不变
 setup(
@@ -72,4 +80,4 @@ setup(
     cmdclass={'build_ext': CMakeBuild},
     zip_safe=False,
     python_requires=">=3.8",
-    )
+)
