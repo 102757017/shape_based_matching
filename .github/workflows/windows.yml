@@ -33,29 +33,29 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python build dependencies
+        # 我们在这里安装了所有需要的依赖
         run: |
           python -m pip install --upgrade pip
           python -m pip install wheel setuptools pybind11 numpy opencv-python
 
-      # --- 最终解决方案：在同一步骤中设置环境变量并构建 ---
-      - name: Build wheel with CMAKE_ARGS
+      - name: Build wheel without isolation
         shell: powershell
         run: |
           # 1. 查找 OpenCV 的 CMake 路径
           $opencv_path = python -c "import os; import cv2; print(os.path.join(os.path.dirname(cv2.__file__), 'cmake'))"
           Write-Host "Found OpenCV CMake path: $opencv_path"
 
-          # 2. 构造 CMAKE_ARGS 参数，并用引号包裹路径以防有空格
+          # 2. 构造 CMAKE_ARGS 参数
           $cmake_args = "-DOpenCV_DIR=`"$opencv_path`""
           Write-Host "Setting CMAKE_ARGS to: $cmake_args"
 
           # 3. 将 CMAKE_ARGS 设置为当前 shell 会话的环境变量
           $env:CMAKE_ARGS = $cmake_args
 
-          # 4. 在同一个 shell 会话中，立即运行构建命令
-          # 这样 pip wheel 启动的子进程就能继承到 CMAKE_ARGS
-          Write-Host "Starting wheel build..."
-          python -m pip wheel . --wheel-dir dist/
+          # 4. 使用 --no-build-isolation 标志运行构建命令
+          # 这会强制 pip 使用当前的环境，从而继承 CMAKE_ARGS 变量
+          Write-Host "Starting wheel build without isolation..."
+          python -m pip wheel . --wheel-dir dist/ --no-build-isolation
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
