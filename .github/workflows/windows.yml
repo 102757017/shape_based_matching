@@ -3,39 +3,28 @@ name: Build Python Wheels for Windows
 
 # 触发工作流的事件
 on:
-  # 当有代码推送到 main 分支时触发
   push:
     branches:
       - main
       - master
-      - python_binding # 也可以指定在 python_binding 分支上触发
-  # 允许在 GitHub Actions 页面手动触发
+      - python_binding
   workflow_dispatch:
 
 jobs:
   build_wheels:
-    # 任务名称
     name: Build wheels on ${{ matrix.os }} for Python ${{ matrix.python-version }}
-
-    # 指定运行环境为 Windows
     runs-on: windows-latest
-
     strategy:
-      # 防止一个任务失败导致所有任务都被取消
       fail-fast: false
       matrix:
-        # 我们只在 Windows 上构建
         os: [windows-latest]
-        # 您可以指定多个 Python 版本
         python-version: ['3.8', '3.11']
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # 确保拉取的是您正在开发的分支
           ref: 'python_binding'
-          # 拉取子模块（如果您的项目有的话）
           submodules: 'recursive'
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -46,27 +35,26 @@ jobs:
       - name: Install Python build dependencies
         run: |
           python -m pip install --upgrade pip
-          # 安装构建所需的 Python 包，包括 opencv-python
           python -m pip install wheel setuptools pybind11 numpy opencv-python
 
-      - name: Set OpenCV_DIR environment variable for CMake
-        # 这个步骤是 Windows 构建的关键
-        # 它运行一小段 Python 脚本来找到 opencv-python 包中的 CMake 配置文件目录
-        # 然后将这个路径设置为环境变量 OpenCV_DIR，这样 CMake 的 find_package(OpenCV) 就能找到它
+      # --- 修改后的关键步骤 ---
+      - name: Set CMAKE_ARGS to locate OpenCV
+        # 我们不再设置 OpenCV_DIR，而是直接构造 CMAKE_ARGS 环境变量。
+        # 这是一个更可靠的方法，可以确保将 OpenCV 的路径直接传递给 CMake 命令。
         shell: powershell
         run: |
           $opencv_path = python -c "import os; import cv2; print(os.path.join(os.path.dirname(cv2.__file__), 'cmake'))"
-          echo "OpenCV_DIR=$opencv_path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "Successfully set OpenCV_DIR to: $opencv_path"
+          # 在 PowerShell 中，我们需要使用 ` (反引号) 来转义 "
+          $cmake_args = "-DOpenCV_DIR=`"$opencv_path`""
+          echo "CMAKE_ARGS=$cmake_args" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "Successfully set CMAKE_ARGS to: $cmake_args"
 
       - name: Build wheel
-        # 这一步和 Linux 版本一样，但它会在 Windows 环境下运行
-        # 它会自动使用 Visual Studio 编译器，并通过上一步设置的环境变量找到 OpenCV
+        # setup.py 在调用 CMake 时会使用上面设置的 CMAKE_ARGS 环境变量
         run: python -m pip wheel . --wheel-dir dist/
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
-          # 为产出物创建一个清晰的名称
           name: python-wheels-${{ matrix.os }}-py${{ matrix.python-version }}
           path: ./dist/*.whl
