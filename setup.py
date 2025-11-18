@@ -2,7 +2,6 @@ import os
 import sys
 import platform
 import subprocess
-# 导入构建依赖
 import numpy
 import pybind11
 from setuptools import setup, Extension
@@ -17,24 +16,27 @@ class CMakeBuild(build_ext):
     def build_extension(self, ext):
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
 
-        # 直接从包中获取路径，这是最可靠的方式
+        # 直接从包中获取路径
         pybind11_cmake_dir = pybind11.get_cmake_dir()
         numpy_include_dir = numpy.get_include()
 
         cmake_args = [
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}',
-            # 明确告诉 CMake pybind11 的位置
             f'-Dpybind11_DIR={pybind11_cmake_dir}',
-            # 明确告诉 CMake numpy 头文件的位置
             f'-DNUMPY_INCLUDE_DIR={numpy_include_dir}',
         ]
+
+        # 显式传递 OpenCV_DIR
+        opencv_dir = os.environ.get('OpenCV_DIR')
+        if opencv_dir:
+            cmake_args.append(f'-DOpenCV_DIR={opencv_dir}')
+            print(f"Explicitly setting OpenCV_DIR: {opencv_dir}")
 
         cfg = 'Debug' if self.debug else 'Release'
         build_args = ['--config', cfg]
         cmake_args += [f'-DCMAKE_BUILD_TYPE={cfg}']
 
         if platform.system() == "Windows":
-            # 在 GitHub Actions 的 windows-latest 环境中使用正确的生成器
             cmake_args += [
                 '-G', 'Visual Studio 17 2022',
                 '-A', 'x64'
@@ -45,46 +47,21 @@ class CMakeBuild(build_ext):
             cmake_args += ['-DCMAKE_BUILD_TYPE=Release']
             build_args += ['--', '-j2']
 
-        # 添加详细的 OpenCV 调试信息
-        print("Environment variables:")
-        for key, value in os.environ.items():
-            if 'OPENCV' in key.upper() or 'PATH' in key:
-                print(f"  {key}: {value}")
-        
-        print("CMake arguments:", cmake_args)
-        print("Build directory:", self.build_temp)
-
         env = os.environ.copy()
         env['CXXFLAGS'] = f'{env.get("CXXFLAGS", "")} -DVERSION_INFO=\\"{self.distribution.get_version()}\\"'
         
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
         
+        print("CMake arguments:", cmake_args)
+        
         try:
-            # 运行 CMake 配置
             subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
-            # 运行 CMake 构建
             subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
             print(f"CMake build failed: {e}")
-            # 尝试诊断问题
-            if platform.system() == "Windows":
-                # 检查 OpenCV 安装
-                opencv_paths = [
-                    "C:\\opencv\\build",
-                    "C:\\tools\\opencv\\build"
-                ]
-                for path in opencv_paths:
-                    if os.path.exists(path):
-                        print(f"Found OpenCV at: {path}")
-                        config_file = os.path.join(path, "OpenCVConfig.cmake")
-                        if os.path.exists(config_file):
-                            print(f"Found OpenCVConfig.cmake at: {config_file}")
-                        else:
-                            print(f"OpenCVConfig.cmake NOT found at: {path}")
             raise
 
-# setup(...) 部分保持不变
 setup(
     name='shape_based_matching_py',
     version='0.1.0',
