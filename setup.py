@@ -37,6 +37,12 @@ class CMakeBuild(build_ext):
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
         cmake_args = ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
                       '-DPYTHON_EXECUTABLE=' + sys.executable]
+        try:
+            pybind11_cmake_dir = pybind11.cmake_dir
+        # 如果失败，则回退到使用旧的 get_cmake_dir() 函数
+        except AttributeError:
+            pybind11_cmake_dir = pybind11.get_cmake_dir()
+        cmake_args.append(f'-Dpybind11_DIR={pybind11_cmake_dir}')
 
         cfg = 'Debug' if self.debug else 'Release'
         build_args = ['--config', cfg]
