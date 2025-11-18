@@ -35,7 +35,6 @@ class CMakeBuild(build_ext):
 
         if platform.system() == "Windows":
             # 在 GitHub Actions 的 windows-latest 环境中使用正确的生成器
-            # 通常包含 Visual Studio 2022
             cmake_args += [
                 '-G', 'Visual Studio 17 2022',
                 '-A', 'x64'
@@ -46,14 +45,20 @@ class CMakeBuild(build_ext):
             cmake_args += ['-DCMAKE_BUILD_TYPE=Release']
             build_args += ['--', '-j2']
 
+        # 添加详细的 OpenCV 调试信息
+        print("Environment variables:")
+        for key, value in os.environ.items():
+            if 'OPENCV' in key.upper() or 'PATH' in key:
+                print(f"  {key}: {value}")
+        
+        print("CMake arguments:", cmake_args)
+        print("Build directory:", self.build_temp)
+
         env = os.environ.copy()
         env['CXXFLAGS'] = f'{env.get("CXXFLAGS", "")} -DVERSION_INFO=\\"{self.distribution.get_version()}\\"'
         
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
-        
-        print("CMake arguments:", cmake_args)
-        print("Build directory:", self.build_temp)
         
         try:
             # 运行 CMake 配置
@@ -61,12 +66,23 @@ class CMakeBuild(build_ext):
             # 运行 CMake 构建
             subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
-            # 如果失败，尝试不使用特定生成器，让 CMake 自动选择
-            print(f"CMake build failed with generator 'Visual Studio 17 2022', trying auto-detection...")
-            # 移除生成器参数
-            cmake_args = [arg for arg in cmake_args if not arg.startswith('-G') and arg != 'Visual Studio 17 2022']
-            subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
-            subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
+            print(f"CMake build failed: {e}")
+            # 尝试诊断问题
+            if platform.system() == "Windows":
+                # 检查 OpenCV 安装
+                opencv_paths = [
+                    "C:\\opencv\\build",
+                    "C:\\tools\\opencv\\build"
+                ]
+                for path in opencv_paths:
+                    if os.path.exists(path):
+                        print(f"Found OpenCV at: {path}")
+                        config_file = os.path.join(path, "OpenCVConfig.cmake")
+                        if os.path.exists(config_file):
+                            print(f"Found OpenCVConfig.cmake at: {config_file}")
+                        else:
+                            print(f"OpenCVConfig.cmake NOT found at: {path}")
+            raise
 
 # setup(...) 部分保持不变
 setup(
