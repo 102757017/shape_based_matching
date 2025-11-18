@@ -27,10 +27,28 @@ class CMakeBuild(build_ext):
         ]
 
         # 显式传递 OpenCV_DIR
-        opencv_dir = os.environ.get('OpenCV_DIR')
-        if opencv_dir:
-            cmake_args.append(f'-DOpenCV_DIR={opencv_dir}')
-            print(f"Explicitly setting OpenCV_DIR: {opencv_dir}")
+        opencv_dir = os.environ.get('OpenCV_DIR', 'C:/opencv/opencv/build')
+        cmake_args.append(f'-DOpenCV_DIR={opencv_dir}')
+        print(f"Setting OpenCV_DIR: {opencv_dir}")
+        
+        # 检查 OpenCV 配置文件是否存在
+        config_file = os.path.join(opencv_dir, 'OpenCVConfig.cmake')
+        if os.path.exists(config_file):
+            print(f"Found OpenCVConfig.cmake at: {config_file}")
+        else:
+            print(f"WARNING: OpenCVConfig.cmake not found at: {config_file}")
+            # 尝试查找其他可能的路径
+            possible_paths = [
+                'C:/opencv/opencv/build',
+                'C:/tools/opencv/build',
+                'C:/opencv/build'
+            ]
+            for path in possible_paths:
+                test_file = os.path.join(path, 'OpenCVConfig.cmake')
+                if os.path.exists(test_file):
+                    print(f"Found alternative OpenCVConfig.cmake at: {test_file}")
+                    cmake_args.append(f'-DOpenCV_DIR={path}')
+                    break
 
         cfg = 'Debug' if self.debug else 'Release'
         build_args = ['--config', cfg]
