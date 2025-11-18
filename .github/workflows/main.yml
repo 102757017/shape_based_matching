@@ -14,66 +14,46 @@ on:
 
 jobs:
   build_wheels:
-    # 任务名称
     name: Build wheels on ${{ matrix.os }} for Python ${{ matrix.python-version }}
-    # 运行环境
     runs-on: ${{ matrix.os }}
-    
-    # 构建矩阵，用于为不同操作系统和 Python 版本并行构建
     strategy:
       matrix:
         os: [ubuntu-latest]
-        python-version: ['3.8', '3.9', '3.10', '3.11']
+        python-version: ['3.8', '3.11']
     steps:
-      # 第一步：检出代码
-      # 使用 actions/checkout 来获取你的仓库代码
       - name: Checkout 'python_binding' branch
         uses: actions/checkout@v4
         with:
-          # --- 关键修改 ---
-          # 使用 'ref' 参数明确指定要检出的分支名称
           ref: 'python_binding'
-          # 如果项目使用了子模块 (submodules)，设置为 true
           submodules: 'recursive'
-      # 第二步：安装 C++ 系统依赖
-      # 根据文档，项目需要 CMake 和 OpenCV3。在 Ubuntu runner 上，我们可以通过 apt 安装。
-      - name: Install system dependencies (CMake & OpenCV)
+      # --- 修改后的步骤 ---
+      - name: Install system dependencies with retry
+        # 使用 shell 的循环来实现简单的重试逻辑
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libopencv-dev
-        # 'build-essential' 包含了 make 和 C++ 编译器
-        # 'libopencv-dev' 是 OpenCV 的开发库，cmake 的 find_package(OpenCV) 需要它
-      # 第三步：设置指定的 Python 版本
+          for i in 1 2 3; do
+            # 设置 DEBIAN_FRONTEND=noninteractive 防止任何可能的交互式提示
+            # -yqq 选项表示自动同意且减少不必要的输出
+            sudo DEBIAN_FRONTEND=noninteractive apt-get update && \
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -yqq build-essential cmake libopencv-dev && \
+            echo "System dependencies installed successfully." && exit 0
+            echo "Attempt $i failed. Retrying in 5 seconds..."
+            sleep 5
+          done
+          echo "Failed to install system dependencies after 3 attempts."
+          exit 1
+      
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # 第四步：安装 Python 构建依赖
-      # 根据文档，需要 numpy, opencv-python, pybind11。
-      # 同时，我们还需要 wheel 和 setuptools 来构建 wheel 包。
       - name: Install Python build dependencies
         run: |
           python -m pip install --upgrade pip
-          # 安装构建工具和核心的 pybind11
-          python -m pip install wheel setuptools pybind11
-          # 安装项目运行时的依赖
-          python -m pip install numpy opencv-python
-      # 第五步：构建 Wheel 包
-      # 文档中提到的 "pip3 install ./" 会执行构建和安装。
-      # 在 CI 中，我们通常只构建而不安装到环境中。
-      # `pip wheel` 命令正是用于此目的，它会将生成的 .whl 文件放入指定目录。
+          python -m pip install wheel setuptools pybind11 numpy opencv-python
       - name: Build wheel
-        run: |
-          # 使用 `pip wheel` 命令在当前目录（.）构建 wheel 包，
-          # 并将输出（-w/--wheel-dir）存放到 `dist` 文件夹中。
-          python -m pip wheel . --wheel-dir dist/
-      # 第六步：上传构建产物
-      # 将 `dist` 文件夹中的所有 .whl 文件作为构建产物上传。
-      # 这样您就可以在 Actions 的运行结果页面下载它们。
+        run: python -m pip wheel . --wheel-dir dist/
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
-          # 产物的名称，可以自定义
           name: python-wheels-${{ matrix.os }}-py${{ matrix.python-version }}
-          # 需要上传的路径
           path: ./dist/*.whl
