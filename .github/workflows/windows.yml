@@ -37,21 +37,25 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install wheel setuptools pybind11 numpy opencv-python
 
-      # --- 修改后的关键步骤 ---
-      - name: Set CMAKE_ARGS to locate OpenCV
-        # 我们不再设置 OpenCV_DIR，而是直接构造 CMAKE_ARGS 环境变量。
-        # 这是一个更可靠的方法，可以确保将 OpenCV 的路径直接传递给 CMake 命令。
+      # --- 最终解决方案：在同一步骤中设置环境变量并构建 ---
+      - name: Build wheel with CMAKE_ARGS
         shell: powershell
         run: |
+          # 1. 查找 OpenCV 的 CMake 路径
           $opencv_path = python -c "import os; import cv2; print(os.path.join(os.path.dirname(cv2.__file__), 'cmake'))"
-          # 在 PowerShell 中，我们需要使用 ` (反引号) 来转义 "
-          $cmake_args = "-DOpenCV_DIR=`"$opencv_path`""
-          echo "CMAKE_ARGS=$cmake_args" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "Successfully set CMAKE_ARGS to: $cmake_args"
+          Write-Host "Found OpenCV CMake path: $opencv_path"
 
-      - name: Build wheel
-        # setup.py 在调用 CMake 时会使用上面设置的 CMAKE_ARGS 环境变量
-        run: python -m pip wheel . --wheel-dir dist/
+          # 2. 构造 CMAKE_ARGS 参数，并用引号包裹路径以防有空格
+          $cmake_args = "-DOpenCV_DIR=`"$opencv_path`""
+          Write-Host "Setting CMAKE_ARGS to: $cmake_args"
+
+          # 3. 将 CMAKE_ARGS 设置为当前 shell 会话的环境变量
+          $env:CMAKE_ARGS = $cmake_args
+
+          # 4. 在同一个 shell 会话中，立即运行构建命令
+          # 这样 pip wheel 启动的子进程就能继承到 CMAKE_ARGS
+          Write-Host "Starting wheel build..."
+          python -m pip wheel . --wheel-dir dist/
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
