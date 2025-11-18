@@ -14,54 +14,31 @@ else()
 endif()
 
 # ----------------- Dependencies -----------------
-# OpenCV - 增强查找逻辑
-message(STATUS "Looking for OpenCV...")
-
-# 首先检查环境变量
+# OpenCV - 使用环境变量中的路径
 if(DEFINED ENV{OpenCV_DIR})
     set(OpenCV_DIR "$ENV{OpenCV_DIR}")
-    message(STATUS "Using OpenCV_DIR from environment: ${OpenCV_DIR}")
-endif()
-
-# 尝试查找 OpenCV
-find_package(OpenCV 4 QUIET)
-
-if(NOT OpenCV_FOUND)
-    # 如果标准查找失败，尝试常见路径
-    message(STATUS "Standard OpenCV find failed, trying alternative paths...")
-    
-    set(possible_paths
-        "C:/opencv/build"
-        "C:/tools/opencv/build" 
-        "C:/opencv"
-        "C:/tools/opencv"
-    )
-    
-    foreach(path IN LISTS possible_paths)
-        if(EXISTS "${path}")
-            message(STATUS "Trying path: ${path}")
-            set(OpenCV_DIR "${path}")
-            find_package(OpenCV 4 QUIET)
-            if(OpenCV_FOUND)
-                message(STATUS "Found OpenCV at: ${path}")
-                break()
-            endif()
-        endif()
-    endforeach()
-endif()
-
-if(OpenCV_FOUND)
-    message(STATUS "OpenCV found:")
-    message(STATUS "  Version: ${OpenCV_VERSION}")
-    message(STATUS "  Libraries: ${OpenCV_LIBS}")
-    message(STATUS "  Include dirs: ${OpenCV_INCLUDE_DIRS}")
+    message(STATUS "Using OpenCV_DIR: ${OpenCV_DIR}")
 else()
-    message(FATAL_ERROR "OpenCV 4 not found. Please install OpenCV and ensure OpenCVConfig.cmake is available.")
+    set(OpenCV_DIR "C:/opencv/opencv/build")
+    message(STATUS "Using default OpenCV_DIR: ${OpenCV_DIR}")
 endif()
 
-# Python and pybind11
-find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development)
+find_package(OpenCV 4 REQUIRED)
+message(STATUS "OpenCV found:")
+message(STATUS "  Version: ${OpenCV_VERSION}")
+message(STATUS "  Libraries: ${OpenCV_LIBS}")
+message(STATUS "  Include dirs: ${OpenCV_INCLUDE_DIRS}")
+
+# Python and pybind11 - 自动检测当前 Python 版本
+# 不指定版本，让 CMake 自动查找当前 Python 解释器
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 REQUIRED)
+
+message(STATUS "Python found:")
+message(STATUS "  Interpreter: ${Python_EXECUTABLE}")
+message(STATUS "  Version: ${Python_VERSION}")
+message(STATUS "  Include dirs: ${Python_INCLUDE_DIRS}")
+message(STATUS "  Library: ${Python_LIBRARIES}")
 
 # ----------------- Python Module Target -----------------
 pybind11_add_module(${PROJECT_NAME}
