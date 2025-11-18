@@ -33,28 +33,37 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python build dependencies
-        # 我们在这里安装了所有需要的依赖
         run: |
           python -m pip install --upgrade pip
           python -m pip install wheel setuptools pybind11 numpy opencv-python
 
-      - name: Build wheel without isolation
-        shell: powershell
+      # --- 最终解决方案：设置 CMAKE_PREFIX_PATH ---
+      - name: Build wheel with CMAKE_PREFIX_PATH
+        # 我们切换到 cmd shell，因为它的 set 语法更直接
+        shell: cmd
         run: |
-          # 1. 查找 OpenCV 的 CMake 路径
-          $opencv_path = python -c "import os; import cv2; print(os.path.join(os.path.dirname(cv2.__file__), 'cmake'))"
-          Write-Host "Found OpenCV CMake path: $opencv_path"
+          @echo off
+          
+          :: 1. 使用 python 查找 opencv-python 的安装根目录 (即 site-packages)
+          for /f "delims=" %%i in ('python -c "import os, sys; print(sys.prefix)"') do (
+            set "PYTHON_PREFIX=%%i"
+          )
+          for /f "delims=" %%i in ('python -c "import sysconfig; print(sysconfig.get_path('platlib'))"') do (
+            set "SITE_PACKAGES=%%i"
+          )
 
-          # 2. 构造 CMAKE_ARGS 参数
-          $cmake_args = "-DOpenCV_DIR=`"$opencv_path`""
-          Write-Host "Setting CMAKE_ARGS to: $cmake_args"
+          echo Found Python Prefix: %PYTHON_PREFIX%
+          echo Found Site Packages: %SITE_PACKAGES%
+          
+          :: 2. 设置 CMAKE_PREFIX_PATH 环境变量
+          :: 这是 CMake 查找库的标准方式，它会自己读取这个变量
+          :: 我们将 python 的安装前缀和 site-packages 目录都加进去，确保万无一失
+          set "CMAKE_PREFIX_PATH=%PYTHON_PREFIX%;%SITE_PACKAGES%"
+          echo Set CMAKE_PREFIX_PATH to: %CMAKE_PREFIX_PATH%
 
-          # 3. 将 CMAKE_ARGS 设置为当前 shell 会话的环境变量
-          $env:CMAKE_ARGS = $cmake_args
-
-          # 4. 使用 --no-build-isolation 标志运行构建命令
-          # 这会强制 pip 使用当前的环境，从而继承 CMAKE_ARGS 变量
-          Write-Host "Starting wheel build without isolation..."
+          :: 3. 运行构建命令
+          :: --no-build-isolation 仍然是必要的，以确保 cmake 能看到我们刚刚设置的环境变量
+          echo Starting wheel build...
           python -m pip wheel . --wheel-dir dist/ --no-build-isolation
 
       - name: Upload wheels as artifact
