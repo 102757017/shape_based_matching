@@ -1,4 +1,3 @@
-# 工作流名称
 name: Build Python Wheels for Windows
 
 # 触发工作流的事件
@@ -10,7 +9,8 @@ on:
       - python_binding
   workflow_dispatch:
 
-jobs build_wheels:
+jobs:
+  build_wheels:
     name: Build wheels on ${{ matrix.os }} for Python ${{ matrix.python-version }}
     runs-on: windows-latest
     strategy:
@@ -43,16 +43,16 @@ jobs build_wheels:
           python -m pip install --upgrade pip
           # 再次确认：不在这里安装 opencv-python，我们链接的是上面安装的C++ SDK
           python -m pip install wheel setuptools pybind11 numpy
-
+      
       - name: Build wheel
         run: |
           # 验证一下 Action 是否成功设置了环境变量 (可选，但有助于调试)
-          echo "OpenCV_DIR is set to: %OpenCV_DIR%"
+          echo "OpenCV_DIR is set to: $env:OpenCV_DIR"
           
           # 直接构建。Dovyski/setup-opencv-action 会自动设置好 OpenCV_DIR，
           # --no-build-isolation 确保我们的构建进程能看到它。
           python -m pip wheel . --wheel-dir dist/ --no-build-isolation
-
+      
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
