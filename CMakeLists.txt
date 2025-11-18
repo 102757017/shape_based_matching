@@ -14,7 +14,7 @@ else()
 endif()
 
 # ----------------- Dependencies -----------------
-# OpenCV - 使用环境变量中的路径
+# OpenCV
 if(DEFINED ENV{OpenCV_DIR})
     set(OpenCV_DIR "$ENV{OpenCV_DIR}")
     message(STATUS "Using OpenCV_DIR: ${OpenCV_DIR}")
@@ -24,49 +24,26 @@ else()
 endif()
 
 find_package(OpenCV 4 REQUIRED)
-message(STATUS "OpenCV found:")
-message(STATUS "  Version: ${OpenCV_VERSION}")
-message(STATUS "  Libraries: ${OpenCV_LIBS}")
-message(STATUS "  Include dirs: ${OpenCV_INCLUDE_DIRS}")
+message(STATUS "OpenCV found: ${OpenCV_VERSION}")
 
-# Python and pybind11 - 使用兼容性更好的查找方式
-find_package(Python REQUIRED COMPONENTS Interpreter Development)
+# Python and pybind11
 find_package(pybind11 REQUIRED)
 
-message(STATUS "Python found:")
-message(STATUS "  Interpreter: ${Python_EXECUTABLE}")
-message(STATUS "  Version: ${Python_VERSION}")
-message(STATUS "  Include dirs: ${Python_INCLUDE_DIRS}")
-message(STATUS "  Library: ${Python_LIBRARIES}")
-
 # ----------------- Python Module Target -----------------
-pybind11_add_module(${PROJECT_NAME}
+# 确保模块名称正确
+pybind11_add_module(shape_based_matching_py
     line2Dup.cpp
     pybind11/pybind11.cpp
     pybind11/np2mat/ndarray_converter.cpp
 )
 
-# Link libraries - 使用兼容性更好的链接方式
-target_link_libraries(${PROJECT_NAME} PRIVATE 
+# Link libraries
+target_link_libraries(shape_based_matching_py PRIVATE 
     ${OpenCV_LIBS}
 )
 
-# 根据 CMake 版本和找到的 Python 目标来链接
-if(TARGET Python::Python)
-    target_link_libraries(${PROJECT_NAME} PRIVATE Python::Python)
-    message(STATUS "Linking with target Python::Python")
-elseif(TARGET Python::Module)
-    target_link_libraries(${PROJECT_NAME} PRIVATE Python::Module)
-    message(STATUS "Linking with target Python::Module")
-else()
-    # 回退到直接使用变量
-    target_include_directories(${PROJECT_NAME} PRIVATE ${Python_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${Python_LIBRARIES})
-    message(STATUS "Linking with Python variables: ${Python_LIBRARIES}")
-endif()
-
 # Include directories for the target
-target_include_directories(${PROJECT_NAME} PRIVATE 
+target_include_directories(shape_based_matching_py PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${OpenCV_INCLUDE_DIRS}
     ${NUMPY_INCLUDE_DIR}
@@ -74,6 +51,14 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 # 添加编译定义
-target_compile_definitions(${PROJECT_NAME} PRIVATE 
+target_compile_definitions(shape_based_matching_py PRIVATE 
     VERSION_INFO=${PROJECT_VERSION}
 )
+
+# 在 Windows 上设置正确的输出名称
+if(WIN32)
+    set_target_properties(shape_based_matching_py PROPERTIES
+        SUFFIX ".pyd"
+        PREFIX ""
+    )
+endif()
