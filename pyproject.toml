@@ -1,0 +1,8 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "pybind11>=2.10.0",  # 固定到支持现代 find_package 的版本
+    "numpy>=1.22"        # 把 numpy 添加为构建时依赖
+]
+build-backend = "setuptools.build_meta"
