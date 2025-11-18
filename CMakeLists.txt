@@ -6,13 +6,6 @@ project(shape_based_matching_py CXX)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 3. 包含 vcpkg 工具链（如果存在）
-if(DEFINED ENV{VCPKG_ROOT} AND EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-    set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/scripts/buildsystems/vcpkg.cmake")
-    set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/scripts/buildsystems/vcpkg.cmake")
-endif()
-
 # ----------------- Compile Options -----------------
 if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /W3 /wd4996")
@@ -21,36 +14,50 @@ else()
 endif()
 
 # ----------------- Dependencies -----------------
-# OpenCV - 改进查找逻辑
+# OpenCV - 增强查找逻辑
+message(STATUS "Looking for OpenCV...")
+
+# 首先检查环境变量
+if(DEFINED ENV{OpenCV_DIR})
+    set(OpenCV_DIR "$ENV{OpenCV_DIR}")
+    message(STATUS "Using OpenCV_DIR from environment: ${OpenCV_DIR}")
+endif()
+
+# 尝试查找 OpenCV
 find_package(OpenCV 4 QUIET)
+
 if(NOT OpenCV_FOUND)
-    # 如果标准查找失败，尝试手动设置路径
-    if(DEFINED ENV{OpenCV_DIR})
-        set(OpenCV_DIR $ENV{OpenCV_DIR})
-        find_package(OpenCV 4 REQUIRED)
-    else()
-        # 尝试常见安装路径
-        set(possible_paths
-            "C:/tools/opencv/build"
-            "C:/opencv/build"
-            "C:/vcpkg/installed/x64-windows"
-        )
-        foreach(path IN LISTS possible_paths)
-            if(EXISTS "${path}/OpenCVConfig.cmake")
-                set(OpenCV_DIR "${path}")
-                find_package(OpenCV 4 REQUIRED)
+    # 如果标准查找失败，尝试常见路径
+    message(STATUS "Standard OpenCV find failed, trying alternative paths...")
+    
+    set(possible_paths
+        "C:/opencv/build"
+        "C:/tools/opencv/build" 
+        "C:/opencv"
+        "C:/tools/opencv"
+    )
+    
+    foreach(path IN LISTS possible_paths)
+        if(EXISTS "${path}")
+            message(STATUS "Trying path: ${path}")
+            set(OpenCV_DIR "${path}")
+            find_package(OpenCV 4 QUIET)
+            if(OpenCV_FOUND)
+                message(STATUS "Found OpenCV at: ${path}")
                 break()
             endif()
-        endforeach()
-    endif()
+        endif()
+    endforeach()
 endif()
 
-if(NOT OpenCV_FOUND)
-    message(FATAL_ERROR "OpenCV 4 not found. Please install OpenCV and set OpenCV_DIR environment variable.")
+if(OpenCV_FOUND)
+    message(STATUS "OpenCV found:")
+    message(STATUS "  Version: ${OpenCV_VERSION}")
+    message(STATUS "  Libraries: ${OpenCV_LIBS}")
+    message(STATUS "  Include dirs: ${OpenCV_INCLUDE_DIRS}")
+else()
+    message(FATAL_ERROR "OpenCV 4 not found. Please install OpenCV and ensure OpenCVConfig.cmake is available.")
 endif()
-
-message(STATUS "Found OpenCV: ${OpenCV_DIR}")
-message(STATUS "OpenCV libraries: ${OpenCV_LIBS}")
 
 # Python and pybind11
 find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development)
@@ -77,7 +84,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/"
 )
 
-# 添加编译定义（如果需要）
+# 添加编译定义
 target_compile_definitions(${PROJECT_NAME} PRIVATE 
     VERSION_INFO=${PROJECT_VERSION}
 )
