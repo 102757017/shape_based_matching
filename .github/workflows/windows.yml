@@ -43,20 +43,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install wheel setuptools pybind11 numpy
 
-      # --- 关键修正：使用 "Here Document" 语法安全地设置 CMAKE_ARGS ---
-      - name: Set CMAKE_ARGS to use Visual Studio 2019
+      # --- 关键修正：不再使用环境变量，而是将 CMake 参数直接传递给 pip ---
+      - name: Build wheel using VS 2019 Generator
         run: |
-          echo "CMAKE_ARGS<<EOF" >> $env:GITHUB_ENV
-          echo "-G `"Visual Studio 16 2019`"" >> $env:GITHUB_ENV
-          echo "EOF" >> $env:GITHUB_ENV
-        # 注意: 在 PowerShell 中，字符串内的双引号需要用反引号 ` 来转义
-
-      - name: Build wheel
-        run: |
-          echo "Verifying environment variables..."
-          echo "OpenCV_DIR is set to: %OpenCV_DIR%"
-          echo "CMAKE_ARGS is set to: %CMAKE_ARGS%"
-          python -m pip wheel . --wheel-dir dist/ --no-build-isolation
+          python -m pip wheel . --wheel-dir dist/ --no-build-isolation --config-settings=cmake.args="-G 'Visual Studio 16 2019'"
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
