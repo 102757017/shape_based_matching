@@ -37,32 +37,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install wheel setuptools pybind11 numpy opencv-python
 
-      # --- 最终解决方案：设置 CMAKE_PREFIX_PATH ---
-      - name: Build wheel with CMAKE_PREFIX_PATH
-        # 我们切换到 cmd shell，因为它的 set 语法更直接
+      # --- 终极解决方案：直接设置 OpenCV_DIR 环境变量 ---
+      - name: Build wheel with OpenCV_DIR environment variable
         shell: cmd
         run: |
           @echo off
-          
-          :: 1. 使用 python 查找 opencv-python 的安装根目录 (即 site-packages)
-          for /f "delims=" %%i in ('python -c "import os, sys; print(sys.prefix)"') do (
-            set "PYTHON_PREFIX=%%i"
-          )
-          for /f "delims=" %%i in ('python -c "import sysconfig; print(sysconfig.get_path('platlib'))"') do (
-            set "SITE_PACKAGES=%%i"
-          )
 
-          echo Found Python Prefix: %PYTHON_PREFIX%
-          echo Found Site Packages: %SITE_PACKAGES%
-          
-          :: 2. 设置 CMAKE_PREFIX_PATH 环境变量
-          :: 这是 CMake 查找库的标准方式，它会自己读取这个变量
-          :: 我们将 python 的安装前缀和 site-packages 目录都加进去，确保万无一失
-          set "CMAKE_PREFIX_PATH=%PYTHON_PREFIX%;%SITE_PACKAGES%"
-          echo Set CMAKE_PREFIX_PATH to: %CMAKE_PREFIX_PATH%
+          :: 1. 查找包含 OpenCVConfig.cmake 的确切目录
+          for /f "delims=" %%i in ('python -c "import os; import cv2; print(os.path.join(os.path.dirname(cv2.__file__), 'cmake'))"') do (
+            set "OPENCV_CMAKE_DIR=%%i"
+          )
+          echo Found OpenCV CMake directory: %OPENCV_CMAKE_DIR%
 
-          :: 3. 运行构建命令
-          :: --no-build-isolation 仍然是必要的，以确保 cmake 能看到我们刚刚设置的环境变量
+          :: 2. 设置 OpenCV_DIR 环境变量。
+          :: 这是 CMake find_package() 会自动检查的标准变量。
+          :: 这是我们与 CMake 直接对话，绕过了 setup.py
+          set "OpenCV_DIR=%OPENCV_CMAKE_DIR%"
+          echo Set environment variable OpenCV_DIR to: %OpenCV_DIR%
+
+          :: 3. 运行构建命令。--no-build-isolation 仍然至关重要，
+          :: 这样 cmake 子进程才能继承我们刚刚设置的环境变量。
           echo Starting wheel build...
           python -m pip wheel . --wheel-dir dist/ --no-build-isolation
 
