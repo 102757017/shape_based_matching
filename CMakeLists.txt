@@ -13,10 +13,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # OpenCV
 find_package(OpenCV 4 REQUIRED)
 
-# Python, pybind11, and NumPy
+# Python and pybind11
+# find_package(pybind11) 会自动生效，因为 setup.py 传入了 -Dpybind11_DIR
 find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development)
 find_package(pybind11 REQUIRED)
-find_package(NumPy REQUIRED)  # <-- 让 CMake 自动寻找 NumPy
+
+# 对于 NumPy，我们不再使用 find_package，而是直接使用传入的路径
+# 这更加直接和可靠
+# find_package(NumPy REQUIRED) <-- 移除或注释掉这一行
 
 # -------------------------------------------------
 
@@ -37,7 +41,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 target_include_directories(${PROJECT_NAME} PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${OpenCV_INCLUDE_DIRS}
-    ${NumPy_INCLUDE_DIRS}        # <-- 将 NumPy 的头文件路径添加进来
+    ${NUMPY_INCLUDE_DIR}        # <-- 使用从 setup.py 传入的变量
     "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/"
 )
 # ---------------------------------------------------------
