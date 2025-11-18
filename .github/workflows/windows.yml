@@ -32,32 +32,26 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install Python build dependencies
+      # --- 关键步骤 1: 安装完整的 OpenCV C++ SDK ---
+      # 这个 Action 会下载官方的 OpenCV 版本，解压，并自动设置好 OpenCV_DIR 环境变量
+      # 指向一个包含完整头文件、.lib 和 .dll 的 SDK
+      - name: Install OpenCV C++ SDK
+        uses: sutoukou/setup-opencv-action@v1
+        with:
+          opencv-version: '4.x' # 你可以指定需要的版本，'4.x' 会安装最新的 4.x 版本
+
+      - name: Install Python build dependencies (excluding opencv-python)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install wheel setuptools pybind11 numpy opencv-python
+          # 注意：我们不再安装 opencv-python，因为 C++ 编译需要的是上面的 SDK
+          # 你的 setup.py 应该将 opencv-python 列为 install_requires，以便用户安装 wheel 时自动安装
+          python -m pip install wheel setuptools pybind11 numpy
 
-      # --- 终极解决方案：直接设置 OpenCV_DIR 环境变量 ---
-      - name: Build wheel with OpenCV_DIR environment variable
-        shell: cmd
+      # --- 关键步骤 2: 直接构建 ---
+      # 因为上一步的 Action 已经正确设置了 OpenCV_DIR 环境变量，我们什么都不用做
+      - name: Build wheel
         run: |
-          @echo off
-
-          :: 1. 查找包含 OpenCVConfig.cmake 的确切目录
-          for /f "delims=" %%i in ('python -c "import os; import cv2; print(os.path.join(os.path.dirname(cv2.__file__), 'cmake'))"') do (
-            set "OPENCV_CMAKE_DIR=%%i"
-          )
-          echo Found OpenCV CMake directory: %OPENCV_CMAKE_DIR%
-
-          :: 2. 设置 OpenCV_DIR 环境变量。
-          :: 这是 CMake find_package() 会自动检查的标准变量。
-          :: 这是我们与 CMake 直接对话，绕过了 setup.py
-          set "OpenCV_DIR=%OPENCV_CMAKE_DIR%"
-          echo Set environment variable OpenCV_DIR to: %OpenCV_DIR%
-
-          :: 3. 运行构建命令。--no-build-isolation 仍然至关重要，
-          :: 这样 cmake 子进程才能继承我们刚刚设置的环境变量。
-          echo Starting wheel build...
+          echo "OpenCV_DIR is set to: %OpenCV_DIR%"
           python -m pip wheel . --wheel-dir dist/ --no-build-isolation
 
       - name: Upload wheels as artifact
