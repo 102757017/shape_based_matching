@@ -29,9 +29,8 @@ message(STATUS "  Version: ${OpenCV_VERSION}")
 message(STATUS "  Libraries: ${OpenCV_LIBS}")
 message(STATUS "  Include dirs: ${OpenCV_INCLUDE_DIRS}")
 
-# Python and pybind11 - 自动检测当前 Python 版本
-# 不指定版本，让 CMake 自动查找当前 Python 解释器
-find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+# Python and pybind11 - 使用兼容性更好的查找方式
+find_package(Python REQUIRED COMPONENTS Interpreter Development)
 find_package(pybind11 REQUIRED)
 
 message(STATUS "Python found:")
@@ -47,11 +46,24 @@ pybind11_add_module(${PROJECT_NAME}
     pybind11/np2mat/ndarray_converter.cpp
 )
 
-# Link libraries
+# Link libraries - 使用兼容性更好的链接方式
 target_link_libraries(${PROJECT_NAME} PRIVATE 
     ${OpenCV_LIBS}
-    Python::Python
 )
+
+# 根据 CMake 版本和找到的 Python 目标来链接
+if(TARGET Python::Python)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Python::Python)
+    message(STATUS "Linking with target Python::Python")
+elseif(TARGET Python::Module)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Python::Module)
+    message(STATUS "Linking with target Python::Module")
+else()
+    # 回退到直接使用变量
+    target_include_directories(${PROJECT_NAME} PRIVATE ${Python_INCLUDE_DIRS})
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${Python_LIBRARIES})
+    message(STATUS "Linking with Python variables: ${Python_LIBRARIES}")
+endif()
 
 # Include directories for the target
 target_include_directories(${PROJECT_NAME} PRIVATE 
