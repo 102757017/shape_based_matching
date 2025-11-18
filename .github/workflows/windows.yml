@@ -32,14 +32,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # --- 关键步骤 1: 使用 Chocolatey 安装预编译的 OpenCV SDK ---
       - name: Install OpenCV C++ SDK via Chocolatey
         run: choco install opencv --version=4.6.0 --yes
-        # 我们在这里固定了一个稳定版本 4.6.0，以确保构建的稳定性
-        # 您也可以改为 choco install opencv --yes 来安装最新版
 
-      # --- 关键步骤 2: 设置 OpenCV_DIR 环境变量 ---
-      # Chocolatey 会将 OpenCV 安装到固定的路径 C:\tools\opencv
       - name: Set OpenCV_DIR environment variable
         run: echo "OpenCV_DIR=C:\tools\opencv\build" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -48,10 +43,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install wheel setuptools pybind11 numpy
 
+      # --- 关键修正：强制使用 VS 2019 编译器以匹配 OpenCV SDK ---
+      - name: Set build tools to Visual Studio 2019
+        run: echo "CMAKE_ARGS=-G \"Visual Studio 16 2019\"" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build wheel
         run: |
-          echo "Verifying OpenCV environment variable..."
+          echo "Verifying environment variables..."
           echo "OpenCV_DIR is set to: %OpenCV_DIR%"
+          echo "CMAKE_ARGS is set to: %CMAKE_ARGS%"
           python -m pip wheel . --wheel-dir dist/ --no-build-isolation
 
       - name: Upload wheels as artifact
