@@ -34,12 +34,16 @@ class CMakeBuild(build_ext):
         cmake_args += [f'-DCMAKE_BUILD_TYPE={cfg}']
 
         if platform.system() == "Windows":
-            # ... (Windows specific args, no change needed)
+            # 使用正确的 Visual Studio 生成器
+            # 在 GitHub Actions 中，使用较新版本的 Visual Studio
+            cmake_args += [
+                '-G', 'Visual Studio 17 2022',
+                '-A', 'x64'
+            ]
             cmake_args += [f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{cfg.upper()}={extdir}']
-            if sys.maxsize > 2**32:
-                cmake_args += ['-A', 'x64']
             build_args += ['--', '/m']
         else:
+            cmake_args += ['-DCMAKE_BUILD_TYPE=Release']
             build_args += ['--', '-j2']
 
         env = os.environ.copy()
@@ -48,7 +52,12 @@ class CMakeBuild(build_ext):
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
         
+        print("CMake arguments:", cmake_args)
+        print("Build directory:", self.build_temp)
+        
+        # 运行 CMake 配置
         subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
+        # 运行 CMake 构建
         subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
 
 # setup(...) 部分保持不变
@@ -63,4 +72,4 @@ setup(
     cmdclass={'build_ext': CMakeBuild},
     zip_safe=False,
     python_requires=">=3.8",
-)
+    )
