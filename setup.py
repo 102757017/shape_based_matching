@@ -33,8 +33,8 @@ class CMakeBuild(build_ext):
             f'-DOpenCV_DIR=C:/opencv/opencv/build',
             # 强制使用Release模式
             '-DCMAKE_BUILD_TYPE=Release',
-            # 开启OpenMP
-            '-DOPENMP_ENABLE=ON',
+            # 强制开启OpenMP
+            '-DOpenMP_CXX_FLAGS=/openmp' if platform.system() == "Windows" else '-DOpenMP_CXX_FLAGS=-fopenmp',
         ]
 
         build_args = ['--config', 'Release']
@@ -44,20 +44,19 @@ class CMakeBuild(build_ext):
                 '-G', 'Visual Studio 17 2022',
                 '-A', 'x64',
                 '-DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=TRUE',
-                # Windows特定优化选项
-                '-DUSE_MSVC_OPTIMIZATIONS=ON'
             ]
             cmake_args += [f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE={extdir}']
-            build_args += ['--', '/m', '/p:UseMultiToolTask=true', '/p:CL_MPCount=8']
+            build_args += ['--', '/m']  # 使用多核编译
         else:
-            build_args += ['--', '-j8']  # 使用8个线程并行编译
+            build_args += ['--', '-j2']
 
         env = os.environ.copy()
         
         # 设置环境变量以优化编译
         if platform.system() == "Windows":
-            env['CL'] = '/O2 /GL /arch:AVX2 /openmp'
-            env['_CL_'] = '/O2 /GL /arch:AVX2 /openmp'
+            # 设置编译器优化标志，确保包含OpenMP
+            env['CFLAGS'] = '/O2 /GL /arch:AVX2 /openmp'
+            env['CXXFLAGS'] = '/O2 /GL /arch:AVX2 /openmp'
         
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
@@ -73,6 +72,11 @@ class CMakeBuild(build_ext):
             
         except subprocess.CalledProcessError as e:
             print(f"CMake build failed: {e}")
+            # 输出更多调试信息
+            print("Build directory contents:")
+            for root, dirs, files in os.walk(self.build_temp):
+                for file in files:
+                    print(f"  {os.path.join(root, file)}")
             raise
 
     def copy_opencv_dlls(self, extdir):
