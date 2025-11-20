@@ -88,7 +88,7 @@ jobs:
 
       - name: Build wheel
         run: |
-          python -m pip wheel . --wheel-dir dist/ --no-build-isolation -v
+          python -m pip wheel . --wheel-dir dist/ --no-build-isolation -v --config-settings=cmake.define.CMAKE_BUILD_TYPE=Release
 
       - name: Check wheel contents
         run: |
