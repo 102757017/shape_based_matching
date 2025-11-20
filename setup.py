@@ -25,45 +25,47 @@ class CMakeBuild(build_ext):
         pybind11_cmake_dir = pybind11.get_cmake_dir()
         numpy_include_dir = numpy.get_include()
 
-        # 强制使用 Release 构建类型和优化选项
         cmake_args = [
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}',
             f'-Dpybind11_DIR={pybind11_cmake_dir}',
             f'-DNUMPY_INCLUDE_DIR={numpy_include_dir}',
             f'-DPython_EXECUTABLE={sys.executable}',
             f'-DOpenCV_DIR=C:/opencv/opencv/build',
-            '-DCMAKE_BUILD_TYPE=Release',  # 强制 Release 模式
-            '-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /Oi /Ot /Oy /GL /openmp /arch:AVX2 /fp:fast',  # 明确的优化标志
+            # 强制使用Release模式
+            '-DCMAKE_BUILD_TYPE=Release',
+            # 开启OpenMP
+            '-DOPENMP_ENABLE=ON',
         ]
 
-        cfg = 'Release'  # 强制使用 Release
-        build_args = ['--config', cfg]
+        build_args = ['--config', 'Release']
 
         if platform.system() == "Windows":
             cmake_args += [
                 '-G', 'Visual Studio 17 2022',
                 '-A', 'x64',
                 '-DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=TRUE',
-                '-T', 'host=x64'  # 指定使用 64 位工具集
+                # Windows特定优化选项
+                '-DUSE_MSVC_OPTIMIZATIONS=ON'
             ]
-            cmake_args += [f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{cfg.upper()}={extdir}']
-            build_args += ['--', '/m', '/p:Configuration=Release']  # 强制 MSBuild 使用 Release
+            cmake_args += [f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE={extdir}']
+            build_args += ['--', '/m', '/p:UseMultiToolTask=true', '/p:CL_MPCount=8']
         else:
-            cmake_args += ['-DCMAKE_CXX_FLAGS=-O3 -march=native -fopenmp -ffast-math']
-            build_args += ['--', '-j4']
+            build_args += ['--', '-j8']  # 使用8个线程并行编译
 
         env = os.environ.copy()
-        # 设置环境变量确保使用 Release
-        env['CMAKE_BUILD_TYPE'] = 'Release'
+        
+        # 设置环境变量以优化编译
+        if platform.system() == "Windows":
+            env['CL'] = '/O2 /GL /arch:AVX2 /openmp'
+            env['_CL_'] = '/O2 /GL /arch:AVX2 /openmp'
         
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
         
-        print(f"CMake args: {cmake_args}")
-        print(f"Build args: {build_args}")
-        
         try:
+            print("Running CMake with args:", cmake_args)
             subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
+            print("Building with args:", build_args)
             subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
             
             # 复制 OpenCV DLL 到输出目录
@@ -76,11 +78,6 @@ class CMakeBuild(build_ext):
     def copy_opencv_dlls(self, extdir):
         """复制所需的 OpenCV DLL 到扩展目录"""
         opencv_bin_path = "C:/opencv/opencv/build/x64/vc16/bin"
-        # 优先查找 Release 版本的 DLL
-        release_dll_path = os.path.join(opencv_bin_path, "Release")
-        if os.path.exists(release_dll_path):
-            opencv_bin_path = release_dll_path
-            
         if os.path.exists(opencv_bin_path):
             print(f"Copying OpenCV DLLs from {opencv_bin_path}")
             
