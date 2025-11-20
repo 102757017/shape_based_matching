@@ -6,37 +6,57 @@ project(shape_based_matching_py CXX)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ----------------- Compile Options -----------------
 # 强制使用Release模式
-set(CMAKE_BUILD_TYPE Release)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
+# ----------------- Compile Options -----------------
 if(MSVC)
     # MSVC编译器优化选项
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /W3 /wd4996 /O2 /fp:fast")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /Oi /Ot /Oy /GL /arch:AVX2")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /W3")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /GL /arch:AVX2")
     
-    # 开启OpenMP
-    find_package(OpenMP REQUIRED)
-    if(OpenMP_CXX_FOUND)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /openmp")
-    endif()
+    # 针对Release模式的额外优化
+    add_compile_options(
+        "$<$<CONFIG:RELEASE>:/O2>"      # 最大优化（速度）
+        "$<$<CONFIG:RELEASE>:/GL>"      # 全程序优化
+        "$<$<CONFIG:RELEASE>:/arch:AVX2>"  # AVX2指令集
+    )
     
-    # AVX/AVX2指令集
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX2")
+    # 链接时优化
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /LTCG")
     
 else()
     # GCC/Clang编译器优化选项
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic -O3 -ffast-math -march=native")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG")
-    
-    # 开启OpenMP
-    find_package(OpenMP REQUIRED)
-    if(OpenMP_CXX_FOUND)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
-    endif()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
     
     # SIMD指令集
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx -mavx2 -mfma -msse4.2")
+    add_compile_options(
+        "$<$<CONFIG:RELEASE>:-O3>"
+        "$<$<CONFIG:RELEASE>:-mavx>"
+        "$<$<CONFIG:RELEASE>:-mavx2>"
+        "$<$<CONFIG:RELEASE>:-mfma>"
+    )
+endif()
+
+# ----------------- OpenMP Support -----------------
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "OpenMP found: ${OpenMP_CXX_VERSION}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    
+    if(MSVC)
+        # MSVC specific OpenMP flags
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /openmp")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
+    endif()
+else()
+    message(WARNING "OpenMP not found - performance may be degraded")
 endif()
 
 # ----------------- Dependencies -----------------
@@ -56,7 +76,6 @@ message(STATUS "OpenCV found: ${OpenCV_VERSION}")
 find_package(pybind11 REQUIRED)
 
 # ----------------- Python Module Target -----------------
-# 确保模块名称正确
 pybind11_add_module(shape_based_matching_py
     line2Dup.cpp
     pybind11/pybind11.cpp
@@ -91,41 +110,5 @@ if(WIN32)
     set_target_properties(shape_based_matching_py PROPERTIES
         SUFFIX ".pyd"
         PREFIX ""
-    )
-endif()
-
-# 添加额外的优化选项
-if(MSVC)
-    target_compile_options(shape_based_matching_py PRIVATE
-        $<$<CONFIG:RELEASE>:
-        /O2      # 最大优化（速度）
-        /Ob2     # 内联扩展
-        /Oi      # 生成内部函数
-        /Ot      # 偏好快速代码
-        /Oy      # 省略帧指针
-        /GL      # 全程序优化
-        /arch:AVX2  # AVX2指令集
-        >
-    )
-    
-    target_link_options(shape_based_matching_py PRIVATE
-        $<$<CONFIG:RELEASE>:
-        /LTCG    # 链接时代码生成
-        /OPT:REF # 消除未使用的函数和数据
-        /OPT:ICF # 相同的COMDAT折叠
-        >
-    )
-else()
-    target_compile_options(shape_based_matching_py PRIVATE
-        $<$<CONFIG:RELEASE>:
-        -O3
-        -mavx
-        -mavx2
-        -mfma
-        -msse4.2
-        -ffast-math
-        -ftree-vectorize
-        -fopt-info-vec
-        >
     )
 endif()
