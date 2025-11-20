@@ -1134,11 +1134,15 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                           const std::string &class_id,
                           const std::vector<TemplatePyramid> &template_pyramids) const
 {
-#pragma omp declare reduction \
-    (omp_insert: std::vector<Match>: omp_out.insert(omp_out.end(), omp_in.begin(), omp_in.end()))
-
-#pragma omp parallel for reduction(omp_insert:matches)
-    for (size_t template_id = 0; template_id < template_pyramids.size(); ++template_id)
+#ifdef _OPENMP
+#pragma omp parallel
+    {
+#endif
+        std::vector<Match> match_private;
+#ifdef _OPENMP
+#pragma omp for nowait
+#endif
+    for (int template_id = 0; template_id < template_pyramids.size(); ++template_id)
     {
         const TemplatePyramid &tp = template_pyramids[template_id];
         // First match over the whole image at the lowest pyramid level
@@ -1263,8 +1267,18 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             candidates.erase(new_end, candidates.end());
         }
 
-        matches.insert(matches.end(), candidates.begin(), candidates.end());
+        match_private.insert(match_private.end(), candidates.begin(), candidates.end());
     }
+#ifdef _OPENMP
+#pragma omp critical
+        {
+#endif
+        matches.insert(matches.end(), match_private.begin(), match_private.end());
+#ifdef _OPENMP
+        }
+    }
+#endif
+
 }
 
 int Detector::addTemplate(const Mat source, const std::string &class_id,
