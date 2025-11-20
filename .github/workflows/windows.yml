@@ -1,7 +1,5 @@
-# 工作流名称
 name: Build Python Wheels for Windows
 
-# 触发工作流的事件
 on:
   push:
     branches:
@@ -31,6 +29,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: TheMrMilchmann/setup-msvc-dev@v4.0.0
+        with:
+          arch: x64
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -86,9 +89,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install wheel setuptools pybind11 numpy cmake
 
+      - name: Verify Compiler Availability
+        run: |
+          Write-Host "=== Checking Visual Studio Compiler ==="
+          cl 2>&1 | Out-Host
+          Write-Host "=== Checking CMake ==="
+          cmake --version
+          Write-Host "=== Checking MSBuild ==="
+          msbuild -version
+
       - name: Build wheel
         run: |
-          python -m pip wheel . --wheel-dir dist/ --no-build-isolation -v --config-settings=cmake.define.CMAKE_BUILD_TYPE=Release
+          python -m pip wheel . --wheel-dir dist/ --no-build-isolation -v
 
       - name: Check wheel contents
         run: |
