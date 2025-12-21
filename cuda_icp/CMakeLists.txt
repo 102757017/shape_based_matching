@@ -15,8 +15,14 @@ endif()
 
 
 # eigen
-find_package(Eigen3 REQUIRED)
-include_directories(${EIGEN3_INCLUDE_DIR})
+# eigen - 直接设置路径，不需要 find_package
+set(EIGEN3_ROOT "C:/Users/sdf63/Downloads/eigen-3.4.0")
+if(EXISTS "${EIGEN3_ROOT}/Eigen/Core")
+    message(STATUS "Using Eigen from: ${EIGEN3_ROOT}")
+    list(APPEND icp_inc ${EIGEN3_ROOT})
+else()
+    message(FATAL_ERROR "Eigen not found at: ${EIGEN3_ROOT}")
+endif()
 
 
 # src
