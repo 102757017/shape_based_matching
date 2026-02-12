@@ -152,8 +152,7 @@ function(find_numpy)
     else()
         #    ?   ·  
         set(NUMPY_PATHS
-            "C:/Python312/Lib/site-packages/numpy/core/include"
-            "D:/ProgramData/Anaconda3/Lib/site-packages/numpy/core/include"
+            "D:/miniforge3/envs/py311_64/Lib/site-packages/numpy/core/include"
             "$ENV{USERPROFILE}/AppData/Local/Programs/Python/Python312/Lib/site-packages/numpy/core/include"
         )
         
@@ -172,15 +171,57 @@ endfunction()
 
 # pybind
 if (USE_PYBIND)
-    find_package(PythonLibs 3 REQUIRED)
-    find_package(pybind11 REQUIRED)
-    find_numpy()
+    # ---------- 1. 智能定位当前 Conda 环境 ----------
+    if(DEFINED ENV{CONDA_PREFIX})
+        message(STATUS "Detected active Conda environment: $ENV{CONDA_PREFIX}")
+        set(Python_ROOT_DIR "$ENV{CONDA_PREFIX}")
+        set(Python_EXECUTABLE "$ENV{CONDA_PREFIX}/python.exe")
+        # 同时设置 pybind11 搜索路径（Windows 下 Conda 安装 pybind11 的位置）
+        set(pybind11_DIR "$ENV{CONDA_PREFIX}/Library/share/cmake/pybind11")
+    else()
+        # 备用：手动指定你的 Miniforge 环境路径（请务必改成你自己的路径）
+        set(Python_ROOT_DIR "D:/miniforge3/envs/py311_64")
+        set(pybind11_DIR "D:/miniforge3/envs/py311_64/Library/share/cmake/pybind11")
+    endif()
+
+    # ---------- 2. 使用现代 CMake 方式查找 Python ----------
+    find_package(Python COMPONENTS Interpreter Development REQUIRED)
+    message(STATUS "Using Python: ${Python_EXECUTABLE} (version ${Python_VERSION})")
+
+    # ---------- 3. 查找 pybind11 ----------
+    find_package(pybind11 CONFIG REQUIRED)
+    message(STATUS "pybind11 found: ${pybind11_DIR}")
+
+    # ---------- 4. 查找 NumPy（依赖上一步找到的 Python_EXECUTABLE）----------
+    # 直接调用你的 find_numpy 函数，但需确保它使用 Python_EXECUTABLE
+    # 下面提供改进版的 find_numpy（内嵌于此，可替换原函数）
+    set(PYTHON_NUMPY_INCLUDE_DIR "")
+    execute_process(
+        COMMAND ${Python_EXECUTABLE} -c "import numpy; print(numpy.get_include())"
+        OUTPUT_VARIABLE NUMPY_PATH_TEMP
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE NUMPY_RESULT
+    )
+    if(NUMPY_RESULT EQUAL 0 AND NUMPY_PATH_TEMP)
+        string(STRIP "${NUMPY_PATH_TEMP}" NUMPY_PATH)
+        string(REGEX REPLACE "[ \t\r\n]+" "" NUMPY_PATH "${NUMPY_PATH}")
+        if(EXISTS "${NUMPY_PATH}/numpy/arrayobject.h")
+            set(PYTHON_NUMPY_INCLUDE_DIR "${NUMPY_PATH}")
+            message(STATUS "Found NumPy include dir: ${NUMPY_PATH}")
+        endif()
+    endif()
+    if(NOT PYTHON_NUMPY_INCLUDE_DIR)
+        message(WARNING "NumPy not found, pybind module may not import numpy arrays")
+    endif()
+
+    # ---------- 5. 编译 pybind 模块 ----------
     set(SOURCE_PYBIND
         pybind11/pybind11.cpp
-        pybind11/np2mat/ndarray_converter.cpp)
-    include_directories(${INCLUDE_DIRECTORIES}
-            ${PYTHON_INCLUDE_DIRS}
-            ${PYTHON_NUMPY_INCLUDE_DIR})
+        pybind11/np2mat/ndarray_converter.cpp
+    )
     pybind11_add_module(${PROJECT_NAME}_py line2Dup.cpp ${SOURCE_PYBIND})
+    target_include_directories(${PROJECT_NAME}_py PRIVATE
+        ${PYTHON_NUMPY_INCLUDE_DIR}   # 仅当需要 numpy 转换时才需要
+    )
     target_link_libraries(${PROJECT_NAME}_py PRIVATE ${OpenCV_LIBS})
 endif()

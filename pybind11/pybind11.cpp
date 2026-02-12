@@ -1,7 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "np2mat/ndarray_converter.h"
-#include "line2Dup.h"
+#include "../line2Dup.h"
 namespace py = pybind11;
 
 PYBIND11_MODULE(shape_based_matching_py, m) {
