@@ -220,6 +220,7 @@ if (USE_PYBIND)
         pybind11/np2mat/ndarray_converter.cpp
     )
     pybind11_add_module(${PROJECT_NAME}_py line2Dup.cpp ${SOURCE_PYBIND})
+    target_link_libraries(${PROJECT_NAME}_py PRIVATE ${OpenCV_LIBS} cuda_icp)
     target_include_directories(${PROJECT_NAME}_py PRIVATE
         ${PYTHON_NUMPY_INCLUDE_DIR}   # 仅当需要 numpy 转换时才需要
     )

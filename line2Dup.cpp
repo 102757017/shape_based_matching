@@ -1,4 +1,6 @@
 #include "line2Dup.h"
+#include "cuda_icp/icp.h"
+#include "cuda_icp/geometry.h" 
 #include <iostream>
 
 using namespace std;
@@ -1540,6 +1542,47 @@ void Detector::writeClasses(const std::string &format) const
         FileStorage fs(filename, FileStorage::WRITE);
         writeClass(class_id, fs);
     }
+}
+
+RegistrationResult Detector::refine(const Match& match) {
+
+    // 1. 获取模板
+    const std::vector<Template>& templ_pyramid = getTemplates(match.class_id, match.template_id);
+    const Template& templ = templ_pyramid[0];
+    // 2. 准备点云 (使用全局命名空间的 Vec2f)
+    // 注意这里是 ::Vec2f 而不是 cuda_icp::Vec2f
+    std::vector<::Vec2f> model_pcd(templ.features.size());
+    for (size_t i = 0; i < templ.features.size(); i++) {
+        model_pcd[i] = {
+            float(templ.features[i].x + match.x),
+            float(templ.features[i].y + match.y)
+        };
+    }
+    // 3. 构建场景
+    // 根据 test.cpp，这些类通常在全局空间
+    ::Scene_kdtree scene;
+    ::KDTree_cpu kdtree;
+
+    if (this->dx_.empty() || this->dy_.empty()) {
+        // 修正错误：OpenCV 宏是 StsBadArg 或 StsError
+        CV_Error(cv::Error::StsBadArg, "Gradient maps (dx_, dy_) are empty. Call match() first.");
+    }
+    scene.init_Scene_kdtree_cpu(this->dx_, this->dy_, kdtree);
+    // 4. 执行 ICP
+    // 明确指定命名空间 cuda_icp::sim3
+    cuda_icp::RegistrationResult icp_res = cuda_icp::sim3::ICP2D_Point2Plane_cpu(model_pcd, scene);
+    // 5. 转换结果
+    RegistrationResult res;
+    res.fitness = icp_res.fitness_;
+    res.inlier_rmse = icp_res.inlier_rmse_;
+
+    res.transformation.resize(3, std::vector<float>(3));
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            res.transformation[i][j] = icp_res.transformation_[i][j];
+        }
+    }
+    return res;
 }
 
 } // namespace line2Dup

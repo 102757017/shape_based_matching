@@ -7,6 +7,13 @@ namespace py = pybind11;
 PYBIND11_MODULE(shape_based_matching_py, m) {
     NDArrayConverter::init_numpy();
 
+    // 1. 绑定结果结构体
+    py::class_<line2Dup::RegistrationResult>(m, "RegistrationResult")
+        .def(py::init<>())
+        .def_readwrite("transformation", &line2Dup::RegistrationResult::transformation)
+        .def_readwrite("fitness", &line2Dup::RegistrationResult::fitness)
+        .def_readwrite("inlier_rmse", &line2Dup::RegistrationResult::inlier_rmse);
+
     py::class_<line2Dup::Match>(m, "Match")
         .def(py::init<>())
         .def_readwrite("x", &line2Dup::Match::x)
@@ -55,7 +62,8 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def("numTemplates", static_cast<int (line2Dup::Detector::*)(const std::string&) const>(&line2Dup::Detector::numTemplates), py::arg("class_id"))
         .def("classIds", &line2Dup::Detector::classIds)
         .def_readwrite("dx_", &line2Dup::Detector::dx_)
-        .def_readwrite("dy_", &line2Dup::Detector::dy_);
+        .def_readwrite("dy_", &line2Dup::Detector::dy_)
+        .def("refine", &line2Dup::Detector::refine, py::arg("match"));
 
     // Info是shapeInfo_producer的嵌套类
     py::class_<shape_based_matching::shapeInfo_producer::Info>(m, "Info")

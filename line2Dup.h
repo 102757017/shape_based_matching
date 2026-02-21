@@ -38,6 +38,12 @@ namespace line2Dup
         void write(cv::FileStorage& fs) const;
     };
 
+    struct RegistrationResult {
+        std::vector<std::vector<float>> transformation; // 3x3 æÿ’Û
+        float fitness;
+        float inlier_rmse;
+    };
+
     class ColorGradientPyramid
     {
     public:
@@ -192,6 +198,9 @@ namespace line2Dup
         void clear_classes() { class_templates.clear(); }
 
         cv::Mat dx_, dy_; // dx dy recorded for icp
+
+        RegistrationResult refine(const Match& match);
+
 
     protected:
         cv::Ptr<ColorGradient> modality;
