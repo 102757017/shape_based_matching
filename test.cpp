@@ -9,7 +9,11 @@
 using namespace std;
 using namespace cv;
 
-static std::string prefix = "/home/meiqua/shape_based_matching/test/";
+#ifdef TEST_DATA_DIR
+static std::string prefix = TEST_DATA_DIR;
+#else
+static std::string prefix = "test/";
+#endif
 
 // NMS, got from cv::dnn so we don't need opencv contrib
 // just collapse it
@@ -187,7 +191,7 @@ void angle_test(string mode = "test", bool viewICP = false){
         Mat img = padded_img(roi).clone();
         assert(img.isContinuous());
 
-//        cvtColor(img, img, CV_BGR2GRAY);
+//        cvtColor(img, img, COLOR_BGR2GRAY);
 
         std::cout << "test img size: " << img.rows * img.cols << std::endl << std::endl;
 
@@ -212,13 +216,13 @@ void angle_test(string mode = "test", bool viewICP = false){
         KDTree_cpu kdtree;
         scene.init_Scene_kdtree_cpu(detector.dx_, detector.dy_, kdtree);
 
-        if(img.channels() == 1) cvtColor(img, img, CV_GRAY2BGR);
+        if(img.channels() == 1) cvtColor(img, img, COLOR_GRAY2BGR);
 
         cv::Mat edge_global;  // get edge
         {
             cv::Mat gray;
             if(img.channels() > 1){
-                cv::cvtColor(img, gray, CV_BGR2GRAY);
+                cv::cvtColor(img, gray, COLOR_BGR2GRAY);
             }else{
                 gray = img;
             }
@@ -226,7 +230,7 @@ void angle_test(string mode = "test", bool viewICP = false){
             cv::Mat smoothed = gray;
             cv::Canny(smoothed, edge_global, 100, 200);
 
-            if(edge_global.channels() == 1) cvtColor(edge_global, edge_global, CV_GRAY2BGR);
+            if(edge_global.channels() == 1) cvtColor(edge_global, edge_global, COLOR_GRAY2BGR);
         }
 
         for(int i=top5-1; i>=0; i--)

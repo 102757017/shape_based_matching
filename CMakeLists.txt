@@ -3,8 +3,8 @@ project(shape_based_matching)
 
 OPTION(USE_PYBIND "Enable pybind" ON)
 
-# 设置 C++ 标准
-set(CMAKE_CXX_STANDARD 14)
+# pybind11 3.x 需要 C++17
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -12,60 +12,61 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
     # MSVC 编译器
     message(STATUS "Using MSVC compiler")
-    
+
     # 基本优化选项
     set(OPTIMIZATION_FLAGS_RELEASE "/O2")
     set(PLATFORM_COMPILE_FLAGS "")
-    
-    # MSVC 的 OpenMP 选项 - 简化版本，避免冲突
+
+    # MSVC 的 OpenMP 选项
     set(OPENMP_FLAGS "/openmp")
-    
+
     # 警告和调试选项
     set(WARNING_FLAGS "/W3 /wd4464")
     set(DEBUG_FLAGS "/Zi /Od /RTC1")
-    
+
     # 字符集
     set(CHAR_SET_FLAGS "/utf-8 /EHsc")
-    
+
     # 设置通用编译标志
     set(COMMON_COMPILE_FLAGS "${CHAR_SET_FLAGS} ${WARNING_FLAGS}")
-    
+
     # 设置 CMake 变量
     set(CMAKE_CXX_FLAGS "${PLATFORM_COMPILE_FLAGS} ${COMMON_COMPILE_FLAGS}")
-    
+
     # 设置调试和发布选项
-    set(CMAKE_CXX_FLAGS_DEBUG "${DEBUG_FLAGS}")
+    # 注意：不用 /MDd 和 /RTC1 —— 本机 CPython 无调试库，pybind 扩展必须以非 _DEBUG 编译
+    set(CMAKE_CXX_FLAGS_DEBUG "/Zi /Od")
     set(CMAKE_CXX_FLAGS_RELEASE "${OPTIMIZATION_FLAGS_RELEASE} ${OPENMP_FLAGS}")
-    
+
     # 链接器选项
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG")
-    
+
 else()
     # GCC/Clang 编译器
     message(STATUS "Using GCC/Clang compiler")
-    
+
     # OpenMP 选项
     set(OPENMP_FLAGS "-fopenmp")
-    
+
     # 优化选项
     set(OPTIMIZATION_FLAGS_RELEASE "-O3")
-    
+
     # SIMD 选项
     if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm|aarch64")
         set(PLATFORM_COMPILE_FLAGS "-mfpu=neon")
     else()
         set(PLATFORM_COMPILE_FLAGS "-march=native")
     endif()
-    
+
     # 警告选项
     set(WARNING_FLAGS "-Wall -Wno-sign-compare")
-    
+
     # 调试信息
     set(DEBUG_FLAGS "-g2 -ggdb")
-    
+
     # 通用编译标志
     set(COMMON_COMPILE_FLAGS "${OPENMP_FLAGS} ${WARNING_FLAGS}")
-    
+
     # 设置 CMake 变量
     set(CMAKE_CXX_FLAGS "${PLATFORM_COMPILE_FLAGS} ${COMMON_COMPILE_FLAGS}")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 ${DEBUG_FLAGS}")
@@ -90,10 +91,24 @@ else()
     message(WARNING "OpenMP not found")
 endif()
 
-# opencv
-set(OpenCV_DIR "C:/Users/sdf63/Downloads/opencv3/build/x64/vc15/lib" CACHE PATH "OpenCV directory")
-find_package(OpenCV 3 REQUIRED)
+# ============ OpenCV 4 ============
+# 指向 OpenCV 4.13.0 预编译包（如需更换版本/路径，修改下面一行即可）
+set(OpenCV_DIR "E:/programing/opencv-4.13.0/opencv/build" CACHE PATH "OpenCV directory")
+find_package(OpenCV 4 REQUIRED)
+message(STATUS "OpenCV version: ${OpenCV_VERSION}")
+message(STATUS "OpenCV libs: ${OpenCV_LIBS}")
 include_directories(${OpenCV_INCLUDE_DIRS})
+
+# Debug 配置下也使用 release 版 OpenCV 库（配合 /MD，避免 _ITERATOR_DEBUG_LEVEL 冲突）
+if(MSVC)
+    foreach(_cvlib ${OpenCV_LIBS})
+        if(TARGET ${_cvlib})
+            set_target_properties(${_cvlib} PROPERTIES
+                MAP_IMPORTED_CONFIG_DEBUG RELEASE
+                MAP_IMPORTED_CONFIG_RELWITHDEBINFO RELEASE)
+        endif()
+    endforeach()
+endif()
 
 # include MIPP headers
 include_directories(${INCLUDE_DIRECTORIES} "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/")
@@ -108,10 +123,20 @@ if(USE_CUDA)
     add_definitions(-DCUDA_ON)
 endif()
 
+# Debug 配置统一使用 release CRT(/MD)：本机 CPython 无调试库，pybind 扩展必须非 _DEBUG 编译
+# 必须放在 add_subdirectory(cuda_icp) 之前，子目录才能继承
+if(MSVC)
+    add_compile_options("$<$<CONFIG:Debug>:/MD>")
+endif()
+
 add_subdirectory(cuda_icp)
 
 # test exe
 add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
+
+# 把测试数据目录的绝对路径写进程序，运行时不再依赖工作目录
+target_compile_definitions(${PROJECT_NAME}_test PRIVATE
+    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/")
 
 # 链接库
 target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS} cuda_icp)
@@ -121,97 +146,79 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(${PROJECT_NAME}_test OpenMP::OpenMP_CXX)
 endif()
 
-
-function(find_numpy)
-    if(NOT PYTHON_EXECUTABLE)
-        return()
-    endif()
-    
-    #     ?   Python   ? NumPy ·  
-    execute_process(
-        COMMAND ${PYTHON_EXECUTABLE} -c "import numpy; print(numpy.get_include())"
-        OUTPUT_VARIABLE NUMPY_PATH_TEMP
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE NUMPY_RESULT
-    )
-    
-    #     ·  
-    if(NUMPY_RESULT EQUAL 0 AND NUMPY_PATH_TEMP)
-        # ?     п?  ?  ?  з 
-        string(STRIP "${NUMPY_PATH_TEMP}" NUMPY_PATH)
-        string(REGEX REPLACE "[ \t\r\n]+" "" NUMPY_PATH "${NUMPY_PATH}")
-        
-        #   ?·  
-        if(EXISTS "${NUMPY_PATH}" AND EXISTS "${NUMPY_PATH}/numpy/arrayobject.h")
-            set(PYTHON_NUMPY_INCLUDE_DIR "${NUMPY_PATH}" PARENT_SCOPE)
-            message(STATUS "Found NumPy include dir: ${NUMPY_PATH}")
-        else()
-            set(PYTHON_NUMPY_INCLUDE_DIR "" PARENT_SCOPE)
-            message(WARNING "NumPy path found but invalid: ${NUMPY_PATH}")
-        endif()
-    else()
-        #    ?   ·  
-        set(NUMPY_PATHS
-            "D:/miniforge3/envs/py311_64/Lib/site-packages/numpy/core/include"
-            "$ENV{USERPROFILE}/AppData/Local/Programs/Python/Python312/Lib/site-packages/numpy/core/include"
-        )
-        
-        foreach(PATH IN LISTS NUMPY_PATHS)
-            if(EXISTS "${PATH}/numpy/arrayobject.h")
-                set(PYTHON_NUMPY_INCLUDE_DIR "${PATH}" PARENT_SCOPE)
-                message(STATUS "Found NumPy include dir (fallback): ${PATH}")
-                return()
-            endif()
-        endforeach()
-        
-        set(PYTHON_NUMPY_INCLUDE_DIR "" PARENT_SCOPE)
-        message(WARNING "NumPy not found")
-    endif()
-endfunction()
-
-# pybind
+# ============ pybind ============
 if (USE_PYBIND)
-    # ---------- 1. 智能定位当前 Conda 环境 ----------
+    # ---------- 1. 定位 Python 解释器 ----------
+    # 优先使用 CONDA_PREFIX；否则默认使用本机的 Python 3.11
     if(DEFINED ENV{CONDA_PREFIX})
         message(STATUS "Detected active Conda environment: $ENV{CONDA_PREFIX}")
-        set(Python_ROOT_DIR "$ENV{CONDA_PREFIX}")
-        set(Python_EXECUTABLE "$ENV{CONDA_PREFIX}/python.exe")
-        # 同时设置 pybind11 搜索路径（Windows 下 Conda 安装 pybind11 的位置）
-        set(pybind11_DIR "$ENV{CONDA_PREFIX}/Library/share/cmake/pybind11")
+        set(PYTHON_EXECUTABLE "$ENV{CONDA_PREFIX}/python.exe" CACHE FILEPATH "Python executable")
     else()
-        # 备用：手动指定你的 Miniforge 环境路径（请务必改成你自己的路径）
-        set(Python_ROOT_DIR "D:/miniforge3/envs/py311_64")
-        set(pybind11_DIR "D:/miniforge3/envs/py311_64/Library/share/cmake/pybind11")
+        set(PYTHON_EXECUTABLE "D:/portable program/python311/python.exe" CACHE FILEPATH "Python executable")
     endif()
 
-    # ---------- 2. 使用现代 CMake 方式查找 Python ----------
-    find_package(Python COMPONENTS Interpreter Development REQUIRED)
-    message(STATUS "Using Python: ${Python_EXECUTABLE} (version ${Python_VERSION})")
+    # ---------- 2. 查找 Python（Development.Module 足够编译扩展） ----------
+    set(Python3_EXECUTABLE "${PYTHON_EXECUTABLE}" CACHE FILEPATH "Python3 executable" FORCE)
+    # 本机安装的是 release 版 CPython，没有 pythonXXX_d.lib。
+    # 强制 pybind11 在 Debug 配置下也链接 release Python 库（否则 LNK1104: python311_d.lib）。
+    set(PYTHON_IS_DEBUG FALSE CACHE BOOL "" FORCE)
+    find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
+    message(STATUS "Using Python: ${Python3_EXECUTABLE} (version ${Python3_VERSION})")
 
-    # ---------- 3. 查找 pybind11 ----------
+    # ---------- 3. 通过 pip 安装的 pybind11 定位 CMake 配置 ----------
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c "import pybind11; print(pybind11.get_cmake_dir())"
+        OUTPUT_VARIABLE pybind11_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE PYBIND11_PROBE_RESULT
+    )
+    if(NOT PYBIND11_PROBE_RESULT EQUAL 0)
+        message(FATAL_ERROR "pybind11 not installed for ${Python3_EXECUTABLE}. Run: \"${Python3_EXECUTABLE}\" -m pip install pybind11")
+    endif()
     find_package(pybind11 CONFIG REQUIRED)
     message(STATUS "pybind11 found: ${pybind11_DIR}")
 
-    # ---------- 4. 查找 NumPy（依赖上一步找到的 Python_EXECUTABLE）----------
-    # 直接调用你的 find_numpy 函数，但需确保它使用 Python_EXECUTABLE
-    # 下面提供改进版的 find_numpy（内嵌于此，可替换原函数）
+    # Debug 编译时 CPython pyconfig.h 会通过 #pragma 自动链接 pythonXXX_d.lib，
+    # 但普通 CPython 不带调试库。这里复制 release 库改名作为替代（标准 workaround）。
+    if(WIN32)
+        set(PY_DEBUG_LIB_DIR "${CMAKE_BINARY_DIR}/py_debug_lib")
+        set(PY_DEBUG_LIB_NAME "python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}_d.lib")
+        # Development.Module 组件下 Python3_LIBRARY 可能为空，直接从解释器目录推导
+        get_filename_component(_py_root "${Python3_EXECUTABLE}" DIRECTORY)
+        set(PY_RELEASE_LIB "${Python3_LIBRARY}")
+        if(NOT PY_RELEASE_LIB OR NOT EXISTS "${PY_RELEASE_LIB}")
+            set(PY_RELEASE_LIB "${_py_root}/libs/python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}.lib")
+        endif()
+        file(MAKE_DIRECTORY "${PY_DEBUG_LIB_DIR}")
+        if(EXISTS "${PY_RELEASE_LIB}" AND NOT EXISTS "${PY_DEBUG_LIB_DIR}/${PY_DEBUG_LIB_NAME}")
+            file(COPY_FILE "${PY_RELEASE_LIB}" "${PY_DEBUG_LIB_DIR}/${PY_DEBUG_LIB_NAME}")
+            message(STATUS "Created fake debug python lib: ${PY_DEBUG_LIB_DIR}/${PY_DEBUG_LIB_NAME}")
+        elseif(NOT EXISTS "${PY_RELEASE_LIB}")
+            message(WARNING "Python release lib not found at ${PY_RELEASE_LIB}; Debug link may fail")
+        endif()
+    endif()
+
+    # ---------- 4. 查找 NumPy include 目录 ----------
     set(PYTHON_NUMPY_INCLUDE_DIR "")
     execute_process(
-        COMMAND ${Python_EXECUTABLE} -c "import numpy; print(numpy.get_include())"
+        COMMAND "${Python3_EXECUTABLE}" -c "import numpy; print(numpy.get_include())"
         OUTPUT_VARIABLE NUMPY_PATH_TEMP
         OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE NUMPY_RESULT
     )
     if(NUMPY_RESULT EQUAL 0 AND NUMPY_PATH_TEMP)
         string(STRIP "${NUMPY_PATH_TEMP}" NUMPY_PATH)
-        string(REGEX REPLACE "[ \t\r\n]+" "" NUMPY_PATH "${NUMPY_PATH}")
         if(EXISTS "${NUMPY_PATH}/numpy/arrayobject.h")
             set(PYTHON_NUMPY_INCLUDE_DIR "${NUMPY_PATH}")
             message(STATUS "Found NumPy include dir: ${NUMPY_PATH}")
+        else()
+            message(STATUS "NumPy include path invalid: [${NUMPY_PATH}/numpy/arrayobject.h]")
         endif()
+    else()
+        message(STATUS "NumPy probe failed: result=${NUMPY_RESULT} output=[${NUMPY_PATH_TEMP}]")
     endif()
     if(NOT PYTHON_NUMPY_INCLUDE_DIR)
-        message(WARNING "NumPy not found, pybind module may not import numpy arrays")
+        message(FATAL_ERROR "NumPy not found for ${Python3_EXECUTABLE}. Run: \"${Python3_EXECUTABLE}\" -m pip install numpy")
     endif()
 
     # ---------- 5. 编译 pybind 模块 ----------
@@ -220,9 +227,29 @@ if (USE_PYBIND)
         pybind11/np2mat/ndarray_converter.cpp
     )
     pybind11_add_module(${PROJECT_NAME}_py line2Dup.cpp ${SOURCE_PYBIND})
+    if(MSVC)
+        # 追加在 pybind11_add_module 自动的 /MDd 之后，保证 /MD 生效
+        target_compile_options(${PROJECT_NAME}_py PRIVATE "$<$<CONFIG:Debug>:/MD>")
+    endif()
+    if(WIN32)
+        target_link_directories(${PROJECT_NAME}_py PRIVATE "${PY_DEBUG_LIB_DIR}")
+    endif()
     target_link_libraries(${PROJECT_NAME}_py PRIVATE ${OpenCV_LIBS} cuda_icp)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(${PROJECT_NAME}_py PRIVATE OpenMP::OpenMP_CXX)
+    endif()
     target_include_directories(${PROJECT_NAME}_py PRIVATE
-        ${PYTHON_NUMPY_INCLUDE_DIR}   # 仅当需要 numpy 转换时才需要
+        ${PYTHON_NUMPY_INCLUDE_DIR}
     )
-    target_link_libraries(${PROJECT_NAME}_py PRIVATE ${OpenCV_LIBS})
+
+    # 构建后把 OpenCV DLL 复制到模块旁边，保证 import 时能加载
+    set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
+    if(EXISTS "${OpenCV_RUNTIME_BIN}")
+        file(GLOB OpenCV_RUNTIME_DLLS "${OpenCV_RUNTIME_BIN}/*.dll")
+        add_custom_command(TARGET ${PROJECT_NAME}_py POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${OpenCV_RUNTIME_DLLS} $<TARGET_FILE_DIR:${PROJECT_NAME}_py>
+            COMMAND_EXPAND_LISTS
+        )
+    endif()
 endif()

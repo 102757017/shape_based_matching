@@ -1,5 +1,5 @@
 # opencv
-find_package(OpenCV 3 REQUIRED)
+find_package(OpenCV 4 REQUIRED)
 list(APPEND icp_inc ${OpenCV_INCLUDE_DIRS})
 list(APPEND icp_lib ${OpenCV_LIBS})
 
@@ -19,7 +19,7 @@ if(USE_CUDA)
 endif()
 
 # eigen
-set(EIGEN3_ROOT "C:/Users/sdf63/Downloads/eigen-3.4.0")
+set(EIGEN3_ROOT "E:/programing/eigen-3.4.0" CACHE PATH "Eigen root directory")
 if(EXISTS "${EIGEN3_ROOT}/Eigen/Core")
     message(STATUS "Using Eigen from: ${EIGEN3_ROOT}")
     list(APPEND icp_inc ${EIGEN3_ROOT})
