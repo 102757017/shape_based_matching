@@ -150,13 +150,42 @@ endif()
 # OpenCV 运行时 DLL 所在目录 (供 pybind 模块与 C ABI 模块拷贝依赖)
 set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
 
-# 把 OpenCV 运行时拷到目标旁边, 保证加载时能找到
+# 随产物拷贝的 OpenCV 运行时。默认只拷 release 变体并排除视频编解码附加库:
+#   opencv_world4130.dll            64.8 MB   (真正需要)
+#   opencv_world4130d.dll          126.4 MB   (调试版, Release 包不需要)
+#   opencv_videoio_ffmpeg4130_64.dll 27.3 MB  (视频采集/编码才用, 本项目只处理静态图)
+# 一把梭会把 218 MB 塞进 Release, 按下面规则过滤后只剩 64.8 MB。
+option(SBM_COPY_OPENCV_DEBUG_DLL "同时拷贝 OpenCV 调试版运行时(opencv_world4130d.dll)" OFF)
+set(SBM_OPENCV_RUNTIME_EXCLUDE "ffmpeg" CACHE STRING
+    "拷贝 OpenCV 运行时时按文件名排除的关键字, 分号分隔")
+
 function(sbm_copy_opencv_runtime target_name)
-    if(EXISTS "${OpenCV_RUNTIME_BIN}")
-        file(GLOB _opencv_dlls "${OpenCV_RUNTIME_BIN}/*.dll")
+    if(NOT EXISTS "${OpenCV_RUNTIME_BIN}")
+        return()
+    endif()
+    file(GLOB _all_dlls "${OpenCV_RUNTIME_BIN}/*.dll")
+    set(_picked "")
+    foreach(_dll ${_all_dlls})
+        get_filename_component(_name "${_dll}" NAME_WE)
+        string(TOLOWER "${_name}" _low)
+        set(_skip FALSE)
+        foreach(_kw ${SBM_OPENCV_RUNTIME_EXCLUDE})
+            string(TOLOWER "${_kw}" _kw_low)
+            if(_low MATCHES "${_kw_low}")
+                set(_skip TRUE)
+            endif()
+        endforeach()
+        if(NOT _skip AND NOT SBM_COPY_OPENCV_DEBUG_DLL AND _low MATCHES "d$")
+            set(_skip TRUE)      # opencv_world4130d.dll 之类的调试变体
+        endif()
+        if(NOT _skip)
+            list(APPEND _picked "${_dll}")
+        endif()
+    endforeach()
+    if(_picked)
         add_custom_command(TARGET ${target_name} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${_opencv_dlls} $<TARGET_FILE_DIR:${target_name}>
+                ${_picked} $<TARGET_FILE_DIR:${target_name}>
             COMMAND_EXPAND_LISTS
         )
     endif()
