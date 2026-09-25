@@ -118,7 +118,8 @@ void PyMatcher::clear() {
 
 py::dict PyMatcher::train(const cv::Mat& train_image, std::vector<int> roi,
                           const std::string& class_id_in, const py::dict& train_params,
-                          const std::string& save_dir_in, py::object exclusion_zones) {
+                          const std::string& save_dir_in, py::object exclusion_zones,
+                          py::object positive_mask, py::object negative_mask) {
     // ---------- 1. 参数解析 ----------
     if (!train_params.contains("feature_num") || !train_params.contains("pyramid_levels") ||
         !train_params.contains("weak_thresh") || !train_params.contains("strong_thresh"))
@@ -169,8 +170,36 @@ py::dict PyMatcher::train(const cv::Mat& train_image, std::vector<int> roi,
         padded_h, padded_w, roi_image.type());
     roi_image.copyTo(padded_img(cv::Rect(padding, padding, w, h)));
 
+    // ---------- 4. 组合训练掩码: 正向掩码(识别区) - 负向掩码(排除区) - 矩形/椭圆排除区 ----------
+    // 基础掩码: 有正向涂抹时 = 涂过的区域(非0处), 否则 = 整个 ROI
     cv::Mat padded_mask = cv::Mat::zeros(padded_h, padded_w, CV_8UC1);
-    cv::rectangle(padded_mask, cv::Rect(padding, padding, w, h), cv::Scalar(255), -1);
+    bool have_positive = false;
+    if (!positive_mask.is_none()) {
+        cv::Mat pm = positive_mask.cast<cv::Mat>();
+        if (pm.channels() == 3) cv::cvtColor(pm, pm, cv::COLOR_BGR2GRAY);
+        if (pm.rows != h || pm.cols != w)
+            throw std::invalid_argument(
+                "positive_mask 尺寸 (" + std::to_string(pm.rows) + ", " + std::to_string(pm.cols) +
+                ") 与 ROI 尺寸 (" + std::to_string(h) + ", " + std::to_string(w) + ") 不一致。");
+        if (cv::countNonZero(pm) > 0) {   // 全 0 = 未使用 -> 默认整个 ROI 参与
+            have_positive = true;
+            pm.copyTo(padded_mask(cv::Rect(padding, padding, w, h)));
+        }
+    }
+    if (!have_positive)
+        cv::rectangle(padded_mask, cv::Rect(padding, padding, w, h), cv::Scalar(255), -1);
+
+    // 负向掩码: 涂过的区域(非0处)一律排除
+    if (!negative_mask.is_none()) {
+        cv::Mat nm = negative_mask.cast<cv::Mat>();
+        if (nm.channels() == 3) cv::cvtColor(nm, nm, cv::COLOR_BGR2GRAY);
+        if (nm.rows != h || nm.cols != w)
+            throw std::invalid_argument(
+                "negative_mask 尺寸 (" + std::to_string(nm.rows) + ", " + std::to_string(nm.cols) +
+                ") 与 ROI 尺寸 (" + std::to_string(h) + ", " + std::to_string(w) + ") 不一致。");
+        if (cv::countNonZero(nm) > 0)
+            padded_mask(cv::Rect(padding, padding, w, h)).setTo(0, nm);
+    }
 
     // 在掩码上绘制排除区域 (实心黑)
     if (!exclusion_zones.is_none()) {

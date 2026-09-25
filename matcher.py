@@ -91,19 +91,25 @@ class Matcher:
         logging.info("Matcher已清空。")
 
     def train(self, train_image, roi_rect_tuple, class_id, train_params,
-              save_dir=".", exclusion_zones=None):
+              save_dir=".", exclusion_zones=None, positive_mask=None, negative_mask=None):
         """训练并保存单个模板文件。所有产物写到 save_dir, 文件名前缀为类别名。
 
         :param roi_rect_tuple: (x, y, w, h)
         :param save_dir: 模板保存目录(不是完整文件路径), 支持中文路径
         :param exclusion_zones: 排除区域字典列表,
             每项形如 {'type': 'exclude_rect'/'exclude_ellipse', 'rect': [x, y, w, h]}
+        :param positive_mask: ROI 尺寸 (h,w) uint8 掩码或 None。
+            正向涂抹模式: 非0处才参与特征提取, 未涂抹区域全部屏蔽;
+            None 或全 0 = 默认整个 ROI 参与
+        :param negative_mask: ROI 尺寸 (h,w) uint8 掩码或 None。
+            负向涂抹模式: 非0处排除特征点(干扰点), 未涂抹区域全部参与
         """
         base_name = safe_file_name(str(class_id).strip())
         save_dir = repair_mojibake(str(save_dir or "."))
         return self._impl.train(
             train_image, list(roi_rect_tuple), base_name, train_params,
-            save_dir, list(exclusion_zones) if exclusion_zones else None)
+            save_dir, list(exclusion_zones) if exclusion_zones else None,
+            positive_mask, negative_mask)
 
     def add_template_class(self, yaml_path, override_params=None):
         """加载模板类别。yaml_path 可传训练产物中的任意一份:

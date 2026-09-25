@@ -38,11 +38,17 @@ public:
     /// :param save_dir: 模板保存目录 (UTF-8, 可以是中文路径)
     /// :param exclusion_zones: list[dict] 或 None,
     ///                         每项 {'type': 'exclude_rect'/'exclude_ellipse', 'rect': [x,y,w,h]}
+    /// :param positive_mask: ROI 尺寸 (h,w) uint8 ndarray 或 None。
+    ///                       正向掩码: 非0处才参与特征提取, 未涂区域全部屏蔽;
+    ///                       None 或全 0 = 默认整个 ROI 参与
+    /// :param negative_mask: ROI 尺寸 (h,w) uint8 ndarray 或 None。
+    ///                       负向掩码: 非0处排除特征点(干扰点), 未涂区域全部参与
     /// :return dict: yaml_path / info_path / preview_path / save_dir / base_name /
     ///               features_image / template_count
     py::dict train(const cv::Mat& train_image, std::vector<int> roi,
                    const std::string& class_id, const py::dict& train_params,
-                   const std::string& save_dir, py::object exclusion_zones);
+                   const std::string& save_dir, py::object exclusion_zones,
+                   py::object positive_mask, py::object negative_mask);
 
     /// 加载模板类别 (对应旧 Matcher.add_template_class)
     /// yaml_path 可传 xxx.yaml / xxx.info.json / xxx.json 中的任意一份,

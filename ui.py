@@ -50,6 +50,18 @@ class ZoomableROIImageLabel(QLabel):
         self.panning = False
         self.last_mouse_pos = QPoint()
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+        # 笔刷涂抹状态 (brush_positive / brush_negative 模式)
+        self.brushing = False        # 笔画进行中
+        self.brush_erase = False     # 当前笔画是否为擦除 (右键)
+        self.last_brush_pt = None    # 上一个图像坐标点 (轨迹插值)
+
+    def keyPressEvent(self, event):
+        # Esc 退出涂抹模式
+        if event.key() == Qt.Key.Key_Escape and self.drawing_mode in ('brush_positive', 'brush_negative'):
+            self.main_window.toggle_brush(self.drawing_mode)  # 再次调用 = 退出
+            return
+        super().keyPressEvent(event)
         
     def setPixmap(self, pixmap):
         self.original_pixmap = pixmap
@@ -102,7 +114,7 @@ class ZoomableROIImageLabel(QLabel):
         if self.zoom_factor != old_zoom_factor:
             mouse_on_image_before_zoom = self.map_label_point_to_image(mouse_on_label)
             self.update_pixmap_display()
-            if mouse_on_image_before_zoom:
+            if mouse_on_image_before_zoom is not None:
                 new_mouse_on_label = self.map_image_point_to_label(mouse_on_image_before_zoom)
                 scroll_area = self.parent().parent()
                 if isinstance(scroll_area, QScrollArea):
@@ -112,6 +124,15 @@ class ZoomableROIImageLabel(QLabel):
             self.update()
             
     def mousePressEvent(self, event):
+        if self.drawing_mode in ('brush_positive', 'brush_negative'):
+            img_pt = self.map_label_point_to_image(event.position().toPoint())
+            if img_pt is not None:
+                self.brushing = True
+                self.brush_erase = (event.button() == Qt.MouseButton.RightButton)
+                self.last_brush_pt = img_pt
+                self.main_window.paint_brush_stroke(img_pt, img_pt, self.brush_erase)
+                self.update()
+            return
         if self.drawing_mode != 'none' and event.button() == Qt.MouseButton.LeftButton:
             self.is_drawing = True
             self.draw_start_point = event.position().toPoint()
@@ -124,8 +145,16 @@ class ZoomableROIImageLabel(QLabel):
 
     def mouseMoveEvent(self, event):
         image_pos = self.map_label_point_to_image(event.position().toPoint())
-        if image_pos: self.main_window.update_status_bar_pos(image_pos.x(), image_pos.y())
-        
+        if image_pos is not None: self.main_window.update_status_bar_pos(image_pos.x(), image_pos.y())
+
+        if self.brushing and event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton):
+            # 笔刷涂抹: 沿轨迹插值, 保证快速拖动不断线
+            img_pt = self.map_label_point_to_image(event.position().toPoint())
+            if img_pt is not None:
+                self.main_window.paint_brush_stroke(self.last_brush_pt or img_pt, img_pt, self.brush_erase)
+                self.last_brush_pt = img_pt
+                self.update()
+            return
         if self.is_drawing and event.buttons() & Qt.MouseButton.LeftButton:
             self.draw_end_point = event.position().toPoint()
             self.update()
@@ -139,11 +168,16 @@ class ZoomableROIImageLabel(QLabel):
                 v_bar.setValue(v_bar.value() - delta.y())
 
     def mouseReleaseEvent(self, event):
+        if self.drawing_mode in ('brush_positive', 'brush_negative'):
+            # 涂抹是持续模式: 一次笔画结束不退出, 直到 Esc / 切换按钮
+            self.brushing = False
+            self.last_brush_pt = None
+            return
         if self.is_drawing and event.button() == Qt.MouseButton.LeftButton:
             start_img_pt = self.map_label_point_to_image(self.draw_start_point)
             end_img_pt = self.map_label_point_to_image(self.draw_end_point)
             
-            if start_img_pt and end_img_pt:
+            if start_img_pt is not None and end_img_pt is not None:
                 rect_in_image_coords = QRect(start_img_pt, end_img_pt).normalized()
                 
                 if self.drawing_mode == 'roi':
@@ -178,7 +212,7 @@ class ZoomableROIImageLabel(QLabel):
             painter.setPen(pen)
             start_point_scaled = self.map_image_point_to_label(self.main_window.roi_rect.topLeft())
             end_point_scaled = self.map_image_point_to_label(self.main_window.roi_rect.bottomRight())
-            if start_point_scaled and end_point_scaled:
+            if start_point_scaled is not None and end_point_scaled is not None:
                 painter.drawRect(QRect(start_point_scaled, end_point_scaled).normalized())
 
         # 2. 绘制匹配ROI (橙色实线, 匹配时只在该区域内找目标)
@@ -187,7 +221,7 @@ class ZoomableROIImageLabel(QLabel):
             painter.setPen(pen)
             start_scaled = self.map_image_point_to_label(self.main_window.match_roi_rect.topLeft())
             end_scaled = self.map_image_point_to_label(self.main_window.match_roi_rect.bottomRight())
-            if start_scaled and end_scaled:
+            if start_scaled is not None and end_scaled is not None:
                 painter.drawRect(QRect(start_scaled, end_scaled).normalized())
 
         # 3. 绘制排除区域 (半透明红色)
@@ -207,7 +241,7 @@ class ZoomableROIImageLabel(QLabel):
                 start_scaled = self.map_image_point_to_label(zone_rect_global.topLeft())
                 end_scaled = self.map_image_point_to_label(zone_rect_global.bottomRight())
 
-                if start_scaled and end_scaled:
+                if start_scaled is not None and end_scaled is not None:
                     scaled_rect = QRect(start_scaled, end_scaled).normalized()
                     if zone['type'] == 'exclude_rect':
                         painter.drawRect(scaled_rect)
@@ -226,11 +260,29 @@ class ZoomableROIImageLabel(QLabel):
             elif self.drawing_mode == 'exclude_ellipse':
                 painter.drawEllipse(rect)
 
+        # 5. 绘制涂抹掩码叠加 (半透明: 绿=识别区, 红=排除区)
+        overlay = self.main_window.build_mask_overlay()
+        if overlay is not None:
+            h, w = overlay.shape[:2]
+            qimg = QImage(overlay.data, w, h, 4 * w, QImage.Format.Format_RGBA8888)
+            tl_scaled = self.map_image_point_to_label(QPoint(0, 0))
+            br_scaled = self.map_image_point_to_label(QPoint(w - 1, h - 1))
+            # 注意: QPoint(0,0) 的布尔值是 False (PySide6 零点为假),
+            # 必须用 is not None 判断, 否则 ROI 从图像原点开始时叠加永远不渲染
+            if tl_scaled is not None and br_scaled is not None:
+                painter.drawImage(QRect(tl_scaled, br_scaled).normalized(), qimg)
+
 
 class TemplateMatchingApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("多类别模板匹配应用程序")
+
+        # 涂抹掩码状态 (ROI 尺寸 uint8, 0/255):
+        #   positive_mask: 识别区(正向) - 非0处才参与特征提取, 未涂=屏蔽; None=未使用(整 ROI 参与)
+        #   negative_mask: 排除区(负向) - 非0处排除特征点, 未涂=参与
+        self.positive_mask = None
+        self.negative_mask = None
         self.setGeometry(100, 100, 1200, 800)
         self.train_image, self.test_image, self.current_cv_image, self.original_image_for_display, self.roi_rect = None, None, None, None, None
         self.exclusion_zones = [] # 存储 {'type': str, 'rect': [x, y, w, h]}
@@ -338,6 +390,25 @@ class TemplateMatchingApp(QMainWindow):
         roi_layout.addLayout(exclusion_layout)
         self.btn_clear_exclusions = QPushButton("清除所有排除区"); self.btn_clear_exclusions.clicked.connect(self.clear_exclusion_zones)
         roi_layout.addWidget(self.btn_clear_exclusions)
+        # 笔刷涂抹: 两种模式 (左键涂抹 / 右键擦除 / Esc 退出)
+        brush_layout = QHBoxLayout()
+        self.btn_brush_positive = QPushButton("涂抹识别区 (绿)")
+        self.btn_brush_positive.setCheckable(True)
+        self.btn_brush_positive.setToolTip(
+            "正向涂抹模式: 涂过的区域才参与特征提取, 未涂抹区域全部屏蔽。\n左键涂抹, 右键擦除, Esc 或再点本按钮退出")
+        self.btn_brush_positive.clicked.connect(lambda: self.toggle_brush('brush_positive'))
+        self.btn_brush_negative = QPushButton("涂抹排除区 (红)")
+        self.btn_brush_negative.setCheckable(True)
+        self.btn_brush_negative.setToolTip(
+            "负向涂抹模式: 涂过的区域排除特征点(干扰点), 未涂抹区域全部参与。\n左键涂抹, 右键擦除, Esc 或再点本按钮退出")
+        self.btn_brush_negative.clicked.connect(lambda: self.toggle_brush('brush_negative'))
+        self.brush_size_spin = QSpinBox(); self.brush_size_spin.setRange(2, 200); self.brush_size_spin.setValue(20)
+        self.brush_size_spin.setToolTip("笔刷直径 (像素)")
+        self.btn_clear_brush = QPushButton("清除涂抹"); self.btn_clear_brush.clicked.connect(self.clear_brush_masks)
+        brush_layout.addWidget(self.btn_brush_positive); brush_layout.addWidget(self.btn_brush_negative)
+        brush_layout.addWidget(QLabel("笔刷:")); brush_layout.addWidget(self.brush_size_spin)
+        brush_layout.addWidget(self.btn_clear_brush)
+        roi_layout.addLayout(brush_layout)
         layout.addWidget(roi_group)
         
         create_group = QGroupBox("3. 模板创建参数"); create_layout = QFormLayout(create_group)
@@ -649,6 +720,8 @@ class TemplateMatchingApp(QMainWindow):
     def set_main_roi(self, rect: QRect):
         self.roi_rect = rect
         self.clear_exclusion_zones() # 清除旧的排除区，因为它们是相对于旧ROI的
+        self.positive_mask = None    # 主ROI变了, 涂抹掩码尺寸失效
+        self.negative_mask = None
         self.update_status("主ROI区域已选择", "success")
         self.image_label.update()
 
@@ -686,6 +759,8 @@ class TemplateMatchingApp(QMainWindow):
     def clear_roi(self):
         self.roi_rect = None
         self.clear_exclusion_zones()
+        self.positive_mask = None    # ROI没了, 涂抹掩码一并作废
+        self.negative_mask = None
         if self.original_image_for_display is not None:
             self.current_cv_image = self.original_image_for_display.copy()
             self.display_image(self.current_cv_image)
@@ -695,6 +770,79 @@ class TemplateMatchingApp(QMainWindow):
     def clear_exclusion_zones(self):
         self.exclusion_zones.clear()
         self.update_status("所有排除区域已清除", "success")
+        self.image_label.update()
+
+    # ---------------- 笔刷涂抹 (识别区/排除区) ----------------
+
+    def toggle_brush(self, mode: str):
+        """进入/退出涂抹模式 (两种模式互斥)。再次点击当前模式按钮 = 退出。"""
+        if self.image_label.drawing_mode == mode:
+            # 退出涂抹模式
+            self.image_label.set_drawing_mode('none')
+            self.image_label.brushing = False
+            self.btn_brush_positive.setChecked(False)
+            self.btn_brush_negative.setChecked(False)
+            self.update_status("已退出涂抹模式", "success")
+            self.image_label.update()
+            return
+        if self.train_image is None:
+            self.update_status("请先加载训练图", "fail")
+            self.sender().setChecked(False)
+            return
+        if self.roi_rect is None:
+            self.update_status("请先创建主ROI区域, 涂抹只在主ROI内有效", "fail")
+            self.sender().setChecked(False)
+            return
+        self.image_label.set_drawing_mode(mode)
+        self.btn_brush_positive.setChecked(mode == 'brush_positive')
+        self.btn_brush_negative.setChecked(mode == 'brush_negative')
+        tip = ("正向涂抹: 涂过的区域才参与特征提取, 未涂=屏蔽" if mode == 'brush_positive'
+               else "负向涂抹: 涂过的区域排除特征点, 未涂=参与")
+        self.update_status(f"{tip} | 左键涂抹, 右键擦除, Esc 退出", "running")
+        self.image_label.setFocus()
+        self.image_label.update()
+
+    def paint_brush_stroke(self, p0, p1, erase: bool):
+        """在当前涂抹模式的掩码上落笔 (图像坐标, 线段插值涂圆)。"""
+        if self.roi_rect is None or self.train_image is None: return
+        rx, ry, rw, rh = self.roi_rect.getRect()
+        attr = 'negative_mask' if self.image_label.drawing_mode == 'brush_negative' else 'positive_mask'
+        mask = getattr(self, attr)
+        if mask is None:
+            mask = np.zeros((rh, rw), np.uint8)
+            setattr(self, attr, mask)
+        radius = max(1, self.brush_size_spin.value() // 2)
+        n = max(1, int(np.hypot(p1.x() - p0.x(), p1.y() - p0.y())))
+        value = 0 if erase else 255
+        for i in range(n + 1):
+            t = i / n
+            mx = int(round(p0.x() + (p1.x() - p0.x()) * t)) - rx
+            my = int(round(p0.y() + (p1.y() - p0.y()) * t)) - ry
+            cv2.circle(mask, (mx, my), radius, value, -1)
+
+    def build_mask_overlay(self):
+        """生成全图尺寸的 RGBA 叠加层 (绿=识别区, 红=排除区); 无涂抹时返回 None。"""
+        if self.train_image is None or self.roi_rect is None: return None
+        if self.positive_mask is None and self.negative_mask is None: return None
+        H, W = self.train_image.shape[:2]
+        ov = np.zeros((H, W, 4), np.uint8)
+        x, y, w, h = self.roi_rect.getRect()
+        x, y = max(0, x), max(0, y)
+        w, h = min(w, W - x), min(h, H - y)
+        if self.positive_mask is not None:
+            m = self.positive_mask[:h, :w] > 0
+            ov[y:y+h, x:x+w][m] = (0, 255, 0, 90)
+        if self.negative_mask is not None:
+            m = self.negative_mask[:h, :w] > 0
+            ov[y:y+h, x:x+w][m] = (255, 0, 0, 110)
+        return ov
+
+    def clear_brush_masks(self):
+        self.positive_mask = None
+        self.negative_mask = None
+        if self.image_label.drawing_mode in ('brush_positive', 'brush_negative'):
+            self.toggle_brush(self.image_label.drawing_mode)
+        self.update_status("涂抹掩码已清除", "success")
         self.image_label.update()
 
     def run_process(self):
@@ -724,9 +872,17 @@ class TemplateMatchingApp(QMainWindow):
             if not save_dir: self.update_status("训练已取消", "success"); self.stop_timer(); return
             save_dir = repair_mojibake(save_dir)  # 修复中文目录名可能被 ANSI 层转码成乱码的问题
 
+            # 笔刷掩码: 识别区(正向) / 排除区(负向)。
+            # 正向掩码全被擦光 = 没有任何区域参与训练, 直接拒绝
+            positive_mask = self.positive_mask
+            negative_mask = self.negative_mask if (self.negative_mask is not None and np.any(self.negative_mask)) else None
+            if positive_mask is not None and not np.any(positive_mask):
+                self.update_status("涂抹的识别区域为空 (全部被擦除), 无法训练", "fail"); self.stop_timer(); return
+
             result = self.matcher.train(
                 self.train_image, self.roi_rect.getRect(), class_id, train_params,
-                save_dir, exclusion_zones=self.exclusion_zones
+                save_dir, exclusion_zones=self.exclusion_zones,
+                positive_mask=positive_mask, negative_mask=negative_mask
             )
             if result:
                 x, y, w, h = self.roi_rect.getRect()

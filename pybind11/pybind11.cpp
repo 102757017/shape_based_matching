@@ -150,7 +150,9 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def("train", &PyMatcher::train,
             py::arg("train_image"), py::arg("roi"), py::arg("class_id"),
             py::arg("train_params"), py::arg("save_dir") = ".",
-            py::arg("exclusion_zones") = py::none())
+            py::arg("exclusion_zones") = py::none(),
+            py::arg("positive_mask") = py::none(),
+            py::arg("negative_mask") = py::none())
         .def("add_template_class", &PyMatcher::add_template_class,
             py::arg("path"), py::arg("override_params") = py::none())
         .def("get_loaded_class_ids", &PyMatcher::get_loaded_class_ids)
