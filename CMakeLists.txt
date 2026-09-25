@@ -3,6 +3,11 @@ project(shape_based_matching)
 
 OPTION(USE_PYBIND "Enable pybind" ON)
 
+# SIMD 指令集级别: NONE(默认 SSE2 基线) / SSE2 / SSE4.2 / AVX / AVX2 / AVX512F
+# 本机 i5-8250U 支持 AVX2, 默认选 AVX2 以获得 MIPP + 编译器向量化的最大收益。
+set(SBM_SIMD_LEVEL "AVX2" CACHE STRING "SIMD ISA level (NONE/SSE2/SSE4.2/AVX/AVX2/AVX512F)")
+set_property(CACHE SBM_SIMD_LEVEL PROPERTY STRINGS "NONE" "SSE2" "SSE4.2" "AVX" "AVX2" "AVX512F")
+
 # pybind11 3.x 需要 C++17
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,11 +19,33 @@ if(MSVC)
     message(STATUS "Using MSVC compiler")
 
     # 基本优化选项
-    set(OPTIMIZATION_FLAGS_RELEASE "/O2")
+    set(OPTIMIZATION_FLAGS_RELEASE "/O2 /Ob2 /GL")
     set(PLATFORM_COMPILE_FLAGS "")
 
     # MSVC 的 OpenMP 选项
     set(OPENMP_FLAGS "/openmp")
+
+    # SIMD: MIPP 依据编译器预定义宏(__SSE2__/__AVX__/__AVX2__)选择向量化实现,
+    # 这些宏由 /arch 开关引入, 所以这里给 /arch 就等于给 MIPP 选代。
+    # NONE 退回 SSE2 基线; 目标 CPU 不支持选中的级别会在运行时触发 SIGILL,
+    # 换机器时请用 -DSBM_SIMD_LEVEL=... 重配。
+    set(SIMD_FLAGS "")
+    string(TOUPPER "${SBM_SIMD_LEVEL}" _simd)
+    if(_simd STREQUAL "SSE2")
+        set(SIMD_FLAGS "/arch:SSE2")
+    elseif(_simd STREQUAL "SSE4.2")
+        set(SIMD_FLAGS "/arch:SSE4.2")
+    elseif(_simd STREQUAL "AVX")
+        set(SIMD_FLAGS "/arch:AVX")
+    elseif(_simd STREQUAL "AVX2")
+        set(SIMD_FLAGS "/arch:AVX2")
+    elseif(_simd STREQUAL "AVX512F")
+        set(SIMD_FLAGS "/arch:AVX512")
+    else()
+        message(WARNING "Unknown SBM_SIMD_LEVEL=[${SBM_SIMD_LEVEL}], fallback to SSE2 baseline")
+        set(SIMD_FLAGS "/arch:SSE2")
+    endif()
+    message(STATUS "SIMD level: ${SBM_SIMD_LEVEL} -> ${SIMD_FLAGS}")
 
     # 警告和调试选项
     # /wd4464: 相对包含路径含 ".."
@@ -31,7 +58,7 @@ if(MSVC)
     set(CHAR_SET_FLAGS "/utf-8 /EHsc")
 
     # 设置通用编译标志
-    set(COMMON_COMPILE_FLAGS "${CHAR_SET_FLAGS} ${WARNING_FLAGS}")
+    set(COMMON_COMPILE_FLAGS "${CHAR_SET_FLAGS} ${WARNING_FLAGS} ${SIMD_FLAGS}")
 
     # 设置 CMake 变量
     set(CMAKE_CXX_FLAGS "${PLATFORM_COMPILE_FLAGS} ${COMMON_COMPILE_FLAGS}")
@@ -41,8 +68,13 @@ if(MSVC)
     set(CMAKE_CXX_FLAGS_DEBUG "/Zi /Od")
     set(CMAKE_CXX_FLAGS_RELEASE "${OPTIMIZATION_FLAGS_RELEASE} ${OPENMP_FLAGS}")
 
-    # 链接器选项
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG")
+    # 链接器选项: /GL(编译期全程序优化, 见 OPTIMIZATION_FLAGS_RELEASE) 必须由 /LTCG 落地,
+    # 且必须作用于静态库/共享库/pybind 模块而不只是 EXE, 否则优化会丢失。
+    # /INCREMENTAL:NO 消除 "LNK4075 忽略 /INCREMENTAL(由于 /LTCG)" —— Release 本就不该增量链接
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
+    set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
+    set(CMAKE_MODULE_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
 
 else()
     # GCC/Clang 编译器
@@ -54,11 +86,24 @@ else()
     # 优化选项
     set(OPTIMIZATION_FLAGS_RELEASE "-O3")
 
-    # SIMD 选项
+    # SIMD 选项: 与 MSVC 分支共用 SBM_SIMD_LEVEL, 保持两边行为一致
     if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm|aarch64")
         set(PLATFORM_COMPILE_FLAGS "-mfpu=neon")
     else()
-        set(PLATFORM_COMPILE_FLAGS "-march=native")
+        string(TOUPPER "${SBM_SIMD_LEVEL}" _simd)
+        if(_simd STREQUAL "SSE2")
+            set(PLATFORM_COMPILE_FLAGS "-msse2")
+        elseif(_simd STREQUAL "SSE4.2")
+            set(PLATFORM_COMPILE_FLAGS "-msse4.2")
+        elseif(_simd STREQUAL "AVX")
+            set(PLATFORM_COMPILE_FLAGS "-mavx")
+        elseif(_simd STREQUAL "AVX2")
+            set(PLATFORM_COMPILE_FLAGS "-mavx2")
+        elseif(_simd STREQUAL "AVX512F")
+            set(PLATFORM_COMPILE_FLAGS "-mavx512f")
+        else()
+            set(PLATFORM_COMPILE_FLAGS "-march=native")
+        endif()
     endif()
 
     # 警告选项

@@ -66,13 +66,9 @@ if(MSVC)
     set_target_properties(cuda_icp PROPERTIES
         COMPILE_FLAGS "/EHsc /utf-8"
     )
-    
-    # 发布模式下添加优化标志
-    target_compile_options(cuda_icp 
-        PRIVATE 
-        "$<$<CONFIG:Release>:/O2 /openmp>"
-        "$<$<CONFIG:Debug>:/Od>"
-    )
+    # 优化/SIMD(/O2 /Ob2 /GL /arch:*) 与 OpenMP 由顶层 CMakeLists.txt 统一提供,
+    # 这里不要重复 add_compile_options: "带空格的字符串" 会被 MSBuild 拆碎传参,
+    # 产生一串 D9002(忽略未知选项 /Oo /Op /Oe ...)。
 endif()
 
 # 设置输出目录
