@@ -21,7 +21,10 @@ if(MSVC)
     set(OPENMP_FLAGS "/openmp")
 
     # 警告和调试选项
-    set(WARNING_FLAGS "/W3 /wd4464")
+    # /wd4464: 相对包含路径含 ".."
+    # /wd4309: 第三方 MIPP(mipp_impl_SSE.hxx) 里 SIMD 常量的截断, 改第三方库不划算
+    # /wd4849: MSVC 只支持 OpenMP 2.0, edge_scene.cpp 的 collapse(2) 会被忽略(不影响正确性)
+    set(WARNING_FLAGS "/W3 /wd4464 /wd4309 /wd4849")
     set(DEBUG_FLAGS "/Zi /Od /RTC1")
 
     # 字符集

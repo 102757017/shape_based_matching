@@ -1049,14 +1049,14 @@ Detector::Detector()
 Detector::Detector(std::vector<int> T)
 {
     this->modality = makePtr<ColorGradient>();
-    pyramid_levels = T.size();
+    pyramid_levels = static_cast<int>(T.size());
     T_at_level = T;
 }
 
 Detector::Detector(int num_features, std::vector<int> T, float weak_thresh, float strong_threash)
 {
     this->modality = makePtr<ColorGradient>(weak_thresh, num_features, strong_threash);
-    pyramid_levels = T.size();
+    pyramid_levels = static_cast<int>(T.size());
     T_at_level = T;
 }
 
@@ -1137,6 +1137,160 @@ std::vector<Match> Detector::match(Mat source, float threshold,
     timer.out("templ match");
 #endif
     return matches;
+}
+
+// ---------------------------------------------------------------------------
+// 重叠度 / 非极大值抑制 / 完整参数版 match
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    // 两个矩形的重叠度: 交面积 / 后者自身面积(不是 IoU, 分母不做并集)
+    inline double overlapOf(const cv::Rect& a, const cv::Rect& b)
+    {
+        double inter = static_cast<double>((a & b).area());
+        double self = static_cast<double>(b.area());
+        return self > 0 ? inter / self : 0.0;
+    }
+
+    // 给每个结果算"被别的目标盖住多少": overlap = max(交面积) / 自身面积
+    // O(n^2), n 是候选数; 一般几百以内没问题
+    void fillOverlap(std::vector<Match>& ms)
+    {
+        std::vector<cv::Rect> rects(ms.size());
+        for (size_t i = 0; i < ms.size(); ++i)
+            rects[i] = cv::Rect(ms[i].x, ms[i].y, ms[i].width, ms[i].height);
+
+        for (size_t i = 0; i < ms.size(); ++i)
+        {
+            double self = static_cast<double>(rects[i].area());
+            double best = 0.0;
+            if (self > 0)
+            {
+                for (size_t j = 0; j < ms.size(); ++j)
+                {
+                    if (i == j) continue;
+                    double ov = static_cast<double>((rects[i] & rects[j]).area()) / self;
+                    if (ov > best) best = ov;
+                }
+            }
+            ms[i].overlap = static_cast<float>(best);
+        }
+    }
+
+    // 贪心 NMS: 按置信度从高到低, 与已保留结果重叠度超过阈值的丢弃
+    std::vector<Match> nmsMatches(const std::vector<Match>& ms, float nms_overlap)
+    {
+        std::vector<Match> sorted = ms;
+        std::sort(sorted.begin(), sorted.end());   // 置信度降序
+
+        std::vector<char> dead(sorted.size(), 0);
+        std::vector<Match> keep;
+        keep.reserve(sorted.size());
+
+        for (size_t i = 0; i < sorted.size(); ++i)
+        {
+            if (dead[i]) continue;
+            keep.push_back(sorted[i]);
+            cv::Rect ri(sorted[i].x, sorted[i].y, sorted[i].width, sorted[i].height);
+            for (size_t j = i + 1; j < sorted.size(); ++j)
+            {
+                if (dead[j]) continue;
+                cv::Rect rj(sorted[j].x, sorted[j].y, sorted[j].width, sorted[j].height);
+                // 分母用被比较者自己的面积: 小目标被大目标完全盖住时会被抑制
+                if (overlapOf(ri, rj) > nms_overlap)
+                    dead[j] = 1;
+            }
+        }
+        return keep;
+    }
+}
+
+std::vector<Match> Detector::match(Mat source, const MatchParams& params)
+{
+    // 1+2. 底层匹配, 并按 min_confidence / class_ids 过滤
+    std::vector<Match> ms = match(source, params.min_confidence, params.class_ids, params.masks);
+
+    // 补上矩形尺寸、置信度、以及"训练图 -> 场景"的初始变换(此时只有平移)
+    for (size_t i = 0; i < ms.size(); ++i)
+    {
+        const std::vector<Template>& tp = getTemplates(ms[i].class_id, ms[i].template_id);
+        const Template& t = tp[0];
+        ms[i].width = t.width;
+        ms[i].height = t.height;
+        ms[i].confidence = ms[i].similarity / 100.f;
+        ms[i].transform = (Mat_<float>(2, 3) << 1, 0, static_cast<float>(ms[i].x - t.tl_x),
+            0, 1, static_cast<float>(ms[i].y - t.tl_y));
+        ms[i].angle = 0.f;
+        ms[i].scale = 1.f;
+    }
+
+    // 3. 算重叠度
+    if (params.fill_overlap)
+        fillOverlap(ms);
+
+    // 4. 丢掉被遮挡太厉害的
+    if (params.max_overlap < 1.f)
+    {
+        std::vector<Match> kept;
+        kept.reserve(ms.size());
+        for (size_t i = 0; i < ms.size(); ++i)
+            if (ms[i].overlap <= params.max_overlap)
+                kept.push_back(ms[i]);
+        ms.swap(kept);
+    }
+
+    // 5. 非极大值抑制
+    if (params.nms)
+        ms = nmsMatches(ms, params.nms_overlap);
+
+    // 6. 最大数量
+    if (params.max_matches > 0 && static_cast<int>(ms.size()) > params.max_matches)
+        ms.resize(static_cast<size_t>(params.max_matches));
+
+    // 7. ICP 精修(开关在这里)
+    if (params.use_refine && !ms.empty())
+    {
+        std::vector<Match> refined;
+        refined.reserve(ms.size());
+        for (size_t i = 0; i < ms.size(); ++i)
+        {
+            RegistrationResult reg = refine(ms[i]);
+            ms[i].fitness = reg.fitness;
+            ms[i].inlier_rmse = reg.inlier_rmse;
+
+            if (params.min_fitness > 0.f && reg.fitness < params.min_fitness)
+                continue;   // 精修后内点率不够, 丢掉
+
+            // 合成: 先平移到(match.x - tl_x, match.y - tl_y), 再作用 ICP 的增量变换
+            //   p_scene = A_icp * (p_train + t0) + b_icp = A_icp * p_train + (A_icp * t0 + b_icp)
+            CV_Assert(reg.transformation.size() >= 2);
+            float a00 = reg.transformation[0][0], a01 = reg.transformation[0][1], b0 = reg.transformation[0][2];
+            float a10 = reg.transformation[1][0], a11 = reg.transformation[1][1], b1 = reg.transformation[1][2];
+
+            float t0x = ms[i].transform.at<float>(0, 2);
+            float t0y = ms[i].transform.at<float>(1, 2);
+
+            ms[i].transform = (Mat_<float>(2, 3) <<
+                a00, a01, a00 * t0x + a01 * t0y + b0,
+                a10, a11, a10 * t0x + a11 * t0y + b1);
+
+            // 从线性部分解出旋转角与缩放
+            ms[i].scale = std::sqrt(a00 * a00 + a10 * a10);
+            ms[i].angle = static_cast<float>(std::atan2(a10, a00) * 180.0 / CV_PI);
+
+            refined.push_back(ms[i]);
+        }
+        ms.swap(refined);
+    }
+
+    return ms;
+}
+
+cv::Rect Detector::matchRect(const Match& match) const
+{
+    const std::vector<Template>& tp = getTemplates(match.class_id, match.template_id);
+    return cv::Rect(match.x, match.y, tp[0].width, tp[0].height);
 }
 
 // Used to filter out weak matches
@@ -1355,9 +1509,9 @@ int Detector::addTemplate(const Mat source, const std::string &class_id,
 static cv::Point2f rotate2d(const cv::Point2f inPoint, const double angRad)
 {
     cv::Point2f outPoint;
-    //CW rotation
-    outPoint.x = std::cos(angRad)*inPoint.x - std::sin(angRad)*inPoint.y;
-    outPoint.y = std::sin(angRad)*inPoint.x + std::cos(angRad)*inPoint.y;
+    //CW rotation (double 表达式 -> float 成员, 显式转换避免 C4244)
+    outPoint.x = static_cast<float>(std::cos(angRad) * inPoint.x - std::sin(angRad) * inPoint.y);
+    outPoint.y = static_cast<float>(std::sin(angRad) * inPoint.x + std::cos(angRad) * inPoint.y);
     return outPoint;
 }
 
@@ -1383,8 +1537,8 @@ int Detector::addTemplate_rotate(const string &class_id, int zero_id,
 
         for(auto& f: to_rotate_tp[l].features){
             Point2f p;
-            p.x = f.x + to_rotate_tp[l].tl_x;
-            p.y = f.y + to_rotate_tp[l].tl_y;
+            p.x = static_cast<float>(f.x + to_rotate_tp[l].tl_x);
+            p.y = static_cast<float>(f.y + to_rotate_tp[l].tl_y);
             Point2f p_rot = rotatePoint(p, center, -theta/180*CV_PI);
 
             Feature f_new;

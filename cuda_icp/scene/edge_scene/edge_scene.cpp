@@ -77,7 +77,7 @@ void Scene_edge::init_Scene_edge_cpu(cv::Mat dx_, cv::Mat dy_, std::vector<::Vec
     // get pcd, dilute to neibor
     {
         // may padding to divid and parallel
-        cv::Mat dist_buffer(height, width, CV_32FC1, FLT_MAX);
+        cv::Mat dist_buffer(static_cast<int>(height), static_cast<int>(width), CV_32FC1, FLT_MAX);
         int kernel_size = int(max_dist_diff+0.5f);
         for(int r=0+kernel_size; r<height - kernel_size; r++){
             for(int c=0+kernel_size; c<width - kernel_size; c++){
@@ -87,7 +87,8 @@ void Scene_edge::init_Scene_edge_cpu(cv::Mat dx_, cv::Mat dy_, std::vector<::Vec
                     for(int i=-kernel_size; i<=kernel_size; i++){
                         for(int j=-kernel_size; j<=kernel_size; j++){
 
-                            float dist_sq = pow2(i) + pow2(j);
+                            // pow2 是模板, 传 int 会返回 int; 显式用 float 避免 C4244
+                            float dist_sq = pow2(static_cast<float>(i)) + pow2(static_cast<float>(j));
 //                            float dist_sq = pow2(j-(pcd.x-c)) + pow2(i-(pcd.y-r));  // this is better?
                             // don't go too far
                             if(dist_sq > pow2(max_dist_diff)) continue;

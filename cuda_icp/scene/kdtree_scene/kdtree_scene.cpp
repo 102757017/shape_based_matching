@@ -90,7 +90,7 @@ void KDTree_cpu::build_tree(int max_num_pcd_in_leaf)
     //root
     nodes.resize(1);
     nodes[0].left = 0;
-    nodes[0].right = index.size();
+    nodes[0].right = static_cast<int>(index.size());
 
     bool exist_new_nodes = false;
     size_t num_nodes_now = 1;
@@ -170,8 +170,8 @@ void KDTree_cpu::build_tree(int max_num_pcd_in_leaf)
                 // split success <----------------------
 
                 // update parent
-                nodes[node_iter].child1 = num_nodes_now;
-                nodes[node_iter].child2 = num_nodes_now + 1;
+                nodes[node_iter].child1 = static_cast<int>(num_nodes_now);
+                nodes[node_iter].child2 = static_cast<int>(num_nodes_now + 1);
                 nodes[node_iter].split_v = split_val;
                 nodes[node_iter].split_dim = split_dim;
                 nodes[node_iter].bbox[0] = x_min;  nodes[node_iter].bbox[1] = x_max;
@@ -180,11 +180,11 @@ void KDTree_cpu::build_tree(int max_num_pcd_in_leaf)
                 // update child
                 nodes[num_nodes_now].left = nodes[node_iter].left;
                 nodes[num_nodes_now].right = left_iter;
-                nodes[num_nodes_now].parent = node_iter;
+                nodes[num_nodes_now].parent = static_cast<int>(node_iter);
 
                 nodes[num_nodes_now + 1].left = left_iter;
                 nodes[num_nodes_now + 1].right = nodes[node_iter].right;
-                nodes[num_nodes_now + 1].parent = node_iter;
+                nodes[num_nodes_now + 1].parent = static_cast<int>(node_iter);
 
                 num_nodes_now += 2;
                 if(!exist_new_nodes) exist_new_nodes = true;

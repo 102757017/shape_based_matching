@@ -127,11 +127,24 @@ namespace line2Dup
         }
     };
 
+    /**
+     * \brief 一次匹配的结果
+     *
+     * 术语约定(与工业视觉 / halcon 一致, 两者语义不同, 不要混用):
+     *
+     *   置信度 (confidence / similarity)
+     *       = 匹配上的特征点数 / 模板总特征点数, 取值 0~1(库中 similarity 是它的百分制 0~100)
+     *       回答"这个结果有多像模板"。
+     *
+     *   重叠度 (overlap)
+     *       = 本目标矩形 mask 与其它目标矩形 mask 的重叠面积 / 自身面积, 取值 0~1
+     *       回答"这个结果有多大一块被别人盖住了"。
+     *       注意: 不是 IoU! IoU 的分母是并集(交/并), 这里的分母是自身面积(交/自身),
+     *       所以同样两块区域, overlap 通常比 IoU 大, 它衡量的是"被遮挡/被重复检测"的程度。
+     */
     struct Match
     {
-        Match()
-        {
-        }
+        Match();
 
         Match(int x, int y, float similarity, const std::string& class_id, int template_id);
 
@@ -150,17 +163,86 @@ namespace line2Dup
             return x == rhs.x && y == rhs.y && similarity == rhs.similarity && class_id == rhs.class_id;
         }
 
-        int x;
-        int y;
-        float similarity;
+        // ---- 位置 ----
+        int x;              // 模板包围盒左上角在场景图中的 x
+        int y;              // 模板包围盒左上角在场景图中的 y
+        int width;          // 目标矩形 mask 的宽(= 模板包围盒宽, 未精修时)
+        int height;         // 目标矩形 mask 的高
+
+        // ---- 置信度 ----
+        float similarity;   // 置信度的百分制形式, 0~100(= confidence * 100)
         std::string class_id;
         int template_id;
+
+        // ---- 扩展信息(由 match(img, MatchParams) 填充) ----
+        float confidence;   // 置信度 0~1, 即 similarity / 100
+        float overlap;      // 重叠度 0~1: 与其它目标的矩形 mask 重叠面积 / 自身面积,
+                            //            0 表示没有和任何目标相交。是"被遮挡比例", 不是 IoU
+
+        cv::Mat transform;  // 2x3 CV_32F 仿射变换, 训练图(模板)坐标系 -> 场景图坐标系。
+                            //    用法: cv::warpAffine(模板图/mask, dst, m.transform, 场景图.size())
+                            //    即可把模板轮廓画到匹配位置。未精修时退化为纯平移+训练时的旋转缩放
+        float angle;        // 从 transform 解出的旋转角(度), 相对训练时用的那一版模板
+        float scale;        // 从 transform 解出的缩放系数
+
+        float fitness;      // ICP 内点率 0~1(精修后有效, 未精修为 -1): 模板点中在场景边缘上找到对应点的比例
+        float inlier_rmse;  // ICP 内点残差(像素), 未精修为 -1
     };
 
-    inline Match::Match(int _x, int _y, float _similarity, const std::string& _class_id, int _template_id)
-        : x(_x), y(_y), similarity(_similarity), class_id(_class_id), template_id(_template_id)
+    inline Match::Match()
+        : x(0), y(0), width(0), height(0), similarity(0), template_id(0),
+        confidence(0), overlap(0), angle(0), scale(1), fitness(-1), inlier_rmse(-1)
     {
     }
+
+    inline Match::Match(int _x, int _y, float _similarity, const std::string& _class_id, int _template_id)
+        : x(_x), y(_y), width(0), height(0), similarity(_similarity), class_id(_class_id),
+        template_id(_template_id), confidence(_similarity / 100.f), overlap(0),
+        angle(0), scale(1), fitness(-1), inlier_rmse(-1)
+    {
+    }
+
+    /**
+     * \brief 匹配参数集合, 一次把"匹配 + 过滤 + 精修"说清楚
+     *
+     * 过滤的执行顺序(见 Detector::match(img, MatchParams)):
+     *   1. class_ids        只匹配指定类别
+     *   2. min_confidence   丢掉置信度不够的
+     *   3. 计算每个结果的重叠度 overlap
+     *   4. max_overlap      丢掉被遮挡太厉害的
+     *   5. nms              非极大值抑制, 同一目标只留置信度最高的那个
+     *   6. max_matches      截断到最大数量
+     *   7. use_refine       对活下来的结果做 ICP 精修, 再按 min_fitness 过滤
+     */
+    struct MatchParams
+    {
+        // ---------- 类别 ----------
+        std::vector<std::string> class_ids;  // 只匹配这些类别; 空 = 匹配全部类别
+
+        // ---------- 置信度 ----------
+        float min_confidence = 90.f;         // 置信度下限, 0~100(对应旧接口的 threshold)
+
+        // ---------- 数量 ----------
+        int max_matches = 0;                 // 最多返回几个结果, 0 = 不限
+
+        // ---------- ICP 精修开关 ----------
+        bool use_refine = false;             // true: 匹配后自动对每个结果跑 ICP, 填 transform/angle/scale/fitness
+                                             // false: 不做精修, 速度快, transform 只有平移部分
+        float min_fitness = 0.f;             // 精修后的内点率下限 0~1, 低于就丢弃(仅 use_refine 时生效)
+
+        // ---------- 重叠度 ----------
+        float max_overlap = 1.f;             // 重叠度上限 0~1; 超过说明该结果大部分被别的目标盖住, 丢弃
+                                             // 1.0 = 不过滤, 0.5 = 自身一半以上被盖住就不要
+
+        // ---------- 非极大值抑制 ----------
+        bool nms = true;                     // 是否做 NMS(同一目标被多个模板/角度重复命中时只留最好的)
+        float nms_overlap = 0.5f;            // NMS 的重叠度阈值 0~1; 与已保留结果重叠超过它就被抑制
+                                             // 0 = 只要相交就抑制, 1 = 几乎不抑制
+
+        // ---------- 其它 ----------
+        cv::Mat masks;                       // 场景 mask, 只在该区域内匹配; 空 = 整幅图
+        bool fill_overlap = true;            // 是否计算 overlap(关闭可省一点点时间)
+    };
 
     class Detector
     {
@@ -171,12 +253,46 @@ namespace line2Dup
         Detector();
 
         Detector(std::vector<int> T);
+        /**
+         * \brief 构造检测器
+         * \param num_features  每个模板最多取多少个特征点(越大越准、越慢)。
+         *                      注意: 它同时决定了置信度的分母 —— 置信度 = 匹配上的点数 / 总点数。
+         *                      实际取不到这么多时会退化成"有多少用多少"(<=4 个点则放弃该模板)
+         * \param T             金字塔每层的"位移容差"(像素)。T 越大越能容忍形变/噪声, 但定位越粗;
+         *                      每层至少 4, 一般给 {4, 8}; 层数 = T.size()
+         * \param weak_thresh   场景图(min_det_contrast)的最小梯度幅值, 低于它的像素不参与匹配。
+         *                      调高可以抗噪声, 调低可以在低对比度图上找到目标
+         * \param strong_thresh 训练图(min_train_contrast)的最小梯度幅值, 只有大于它的点才会被选为模板特征点
+         */
         Detector(int num_features, std::vector<int> T, float weak_thresh = 30.0f, float strong_thresh = 60.0f);
 
+        /**
+         * \brief 在场景图上做匹配(完整参数版)
+         * \param sources 场景图, 单通道灰度; 尺寸需为 16 的倍数(否则自己补边)
+         * \param params  见 MatchParams: 类别 / 置信度 / 重叠度 / NMS / 最大数量 / ICP 开关
+         * \return 过滤后的结果, 默认按置信度降序; 每个结果带 confidence / overlap / transform
+         */
+        std::vector<Match> match(cv::Mat sources, const MatchParams& params);
+
+        /**
+         * \brief 简化版, 等价于只设了 min_confidence 和 class_ids 的 MatchParams(不做 NMS、不精修)
+         * \param threshold 置信度下限(0~100), 与 MatchParams::min_confidence 同义
+         * \param class_ids 只匹配这些类别, 空 = 全部
+         * \param masks     场景 mask, 只在该区域内匹配
+         */
         std::vector<Match> match(cv::Mat sources, float threshold,
             const std::vector<std::string>& class_ids = std::vector<std::string>(),
             const cv::Mat masks = cv::Mat());
 
+        /**
+         * \brief 训练一个模板
+         * \param sources     训练图(灰度)
+         * \param class_id    类别名, 匹配时可按类别过滤
+         * \param object_mask 训练区域 mask(CV_8UC1, 非零处参与), 用来"涂抹掉"不想要的区域。
+         *                    传空 = 整幅图都参与。注意内部会先 erode 1 像素, 避免取到区域边界外的梯度
+         * \param num_features 覆盖构造时的 num_features; 0 = 用构造时的值
+         * \return template_id(该类别内从 0 递增), 失败返回 -1
+         */
         int addTemplate(const cv::Mat sources, const std::string& class_id,
             const cv::Mat& object_mask, int num_features = 0);
 
@@ -228,7 +344,24 @@ namespace line2Dup
 
         cv::Mat dx_, dy_; // dx dy recorded for icp
 
+        /**
+         * \brief 对单个 match 做 ICP 精修(手动版)
+         *
+         * ICP 的开关有两种用法:
+         *   1. 自动: MatchParams::use_refine = true, match() 内部会对过滤后留下来的结果逐个精修
+         *   2. 手动: 关闭 use_refine, 自己挑几个重要的结果再调本函数
+         *
+         * 返回的 transformation 是 3x3 相似变换(旋转+缩放+平移), 是**增量**矩阵:
+         *   它作用在"模板点已经摆到 (match.x, match.y) 之后"的全局坐标上, 即 model -> scene 的修正量。
+         *   想直接把模板画到场景上, 用 Match::transform(已合成好平移), 不用自己拼。
+         *
+         * 注意: 必须在 match() 之后调用, 它依赖 match() 填充的 dx_ / dy_, 否则抛 StsBadArg。
+         *       fitness = 内点数 / 模板点数, 即"ICP 意义上的置信度"。
+         */
         RegistrationResult refine(const Match& match);
+
+        /// 某个 match 对应的目标矩形(模板包围盒摆到 match.x/y)
+        cv::Rect matchRect(const Match& match) const;
 
 
     protected:

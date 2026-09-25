@@ -37,7 +37,7 @@ inline void GetMaxScoreIndex(const std::vector<float>& scores, const float thres
     {
         if (scores[i] > threshold)
         {
-            score_index_vec.push_back(std::make_pair(scores[i], i));
+            score_index_vec.push_back(std::make_pair(scores[i], static_cast<int>(i)));
         }
     }
     std::stable_sort(score_index_vec.begin(), score_index_vec.end(),
@@ -233,7 +233,7 @@ void angle_test(string mode = "test", bool viewICP = false){
             if(edge_global.channels() == 1) cvtColor(edge_global, edge_global, COLOR_GRAY2BGR);
         }
 
-        for(int i=top5-1; i>=0; i--)
+        for(int i=static_cast<int>(top5)-1; i>=0; i--)
         {
             Mat edge = edge_global.clone();
 
@@ -290,8 +290,8 @@ void angle_test(string mode = "test", bool viewICP = false){
             randColor[2] = 0;
             for(int i=0; i<templ[0].features.size(); i++){
                 auto feat = templ[0].features[i];
-                float x = feat.x + match.x;
-                float y = feat.y + match.y;
+                float x = float(feat.x + match.x);
+                float y = float(feat.y + match.y);
                 float new_x = result.transformation_[0][0]*x + result.transformation_[0][1]*y + result.transformation_[0][2];
                 float new_y = result.transformation_[1][0]*x + result.transformation_[1][1]*y + result.transformation_[1][2];
 

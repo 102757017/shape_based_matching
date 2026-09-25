@@ -28,9 +28,36 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def(py::init<>())
         .def_readwrite("x", &line2Dup::Match::x)
         .def_readwrite("y", &line2Dup::Match::y)
+        .def_readwrite("width", &line2Dup::Match::width)
+        .def_readwrite("height", &line2Dup::Match::height)
         .def_readwrite("similarity", &line2Dup::Match::similarity)
         .def_readwrite("class_id", &line2Dup::Match::class_id)
-        .def_readwrite("template_id", &line2Dup::Match::template_id);
+        .def_readwrite("template_id", &line2Dup::Match::template_id)
+        .def_readwrite("confidence", &line2Dup::Match::confidence)
+        .def_readwrite("overlap", &line2Dup::Match::overlap)
+        .def_readwrite("transform", &line2Dup::Match::transform)
+        .def_readwrite("angle", &line2Dup::Match::angle)
+        .def_readwrite("scale", &line2Dup::Match::scale)
+        .def_readwrite("fitness", &line2Dup::Match::fitness)
+        .def_readwrite("inlier_rmse", &line2Dup::Match::inlier_rmse)
+        .def("__repr__", [](const line2Dup::Match& m) {
+            return "<Match class='" + m.class_id + "' conf=" + std::to_string(m.confidence).substr(0, 5) +
+                " overlap=" + std::to_string(m.overlap).substr(0, 5) +
+                " pos=(" + std::to_string(m.x) + "," + std::to_string(m.y) + ")>";
+        });
+
+    py::class_<line2Dup::MatchParams>(m, "MatchParams")
+        .def(py::init<>())
+        .def_readwrite("class_ids", &line2Dup::MatchParams::class_ids)
+        .def_readwrite("min_confidence", &line2Dup::MatchParams::min_confidence)
+        .def_readwrite("max_matches", &line2Dup::MatchParams::max_matches)
+        .def_readwrite("use_refine", &line2Dup::MatchParams::use_refine)
+        .def_readwrite("min_fitness", &line2Dup::MatchParams::min_fitness)
+        .def_readwrite("max_overlap", &line2Dup::MatchParams::max_overlap)
+        .def_readwrite("nms", &line2Dup::MatchParams::nms)
+        .def_readwrite("nms_overlap", &line2Dup::MatchParams::nms_overlap)
+        .def_readwrite("fill_overlap", &line2Dup::MatchParams::fill_overlap)
+        .def_readwrite("masks", &line2Dup::MatchParams::masks);
 
     py::class_<line2Dup::Feature>(m, "Feature")
         .def(py::init<>())
@@ -65,8 +92,15 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def("clear_classes", static_cast<void (line2Dup::Detector::*)()>(&line2Dup::Detector::clear_classes))
         .def("readClasses", &line2Dup::Detector::readClasses,
             py::arg("class_ids") = std::vector<std::string>(), py::arg("format") = "templates_%s.yml.gz")
-        .def("match", &line2Dup::Detector::match, py::arg("sources"),
-            py::arg("threshold"), py::arg("class_ids") = std::vector<std::string>(), py::arg("masks") = cv::Mat())
+        // 两个 match 重载: 简化版(阈值) 与 完整参数版(MatchParams), 必须显式消歧
+        .def("match", py::overload_cast<cv::Mat, float, const std::vector<std::string>&, const cv::Mat>(
+                &line2Dup::Detector::match),
+            py::arg("sources"), py::arg("threshold"),
+            py::arg("class_ids") = std::vector<std::string>(), py::arg("masks") = cv::Mat())
+        .def("match", py::overload_cast<cv::Mat, const line2Dup::MatchParams&>(
+                &line2Dup::Detector::match),
+            py::arg("sources"), py::arg("params"))
+        .def("matchRect", &line2Dup::Detector::matchRect, py::arg("match"))
         .def("getTemplates", &line2Dup::Detector::getTemplates, py::arg("class_id"), py::arg("template_id"))
         .def("numTemplates", static_cast<int (line2Dup::Detector::*)() const>(&line2Dup::Detector::numTemplates))
         .def("numTemplates", static_cast<int (line2Dup::Detector::*)(const std::string&) const>(&line2Dup::Detector::numTemplates), py::arg("class_id"))

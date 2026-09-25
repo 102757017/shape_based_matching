@@ -67,7 +67,7 @@ namespace cuda_icp {
         thrust__pcd2Ab<Scene> trasnformer(scene);
 
         // use one extra turn
-        for (uint32_t iter = 0; iter <= criteria.max_iteration_; iter++) {
+        for (int iter = 0; iter <= criteria.max_iteration_; iter++) {
 
             Vec11f reducer = Vec11f::Zero();
 
@@ -184,7 +184,7 @@ namespace cuda_icp {
             thrust__pcd2Ab<Scene> trasnformer(scene);
 
             // use one extra turn
-            for (uint32_t iter = 0; iter <= criteria.max_iteration_; iter++) {
+            for (int iter = 0; iter <= criteria.max_iteration_; iter++) {
 
                 Vec16f reducer = Vec16f::Zero();
 
