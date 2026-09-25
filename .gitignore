@@ -55,6 +55,8 @@ dist/
 # ============================================================
 test/_ui_smoke/
 py_tests/输出_测试目录/
+py_tests/输出_CABI/
+py_tests/输出_CABI_PY/
 py_tests/ab_旧版输出/
 py_tests/ab_新版输出/
 py_tests/离屏涂抹验证/

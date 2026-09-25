@@ -134,6 +134,50 @@ endif()
 
 add_subdirectory(cuda_icp)
 
+# ============ 纯 C++ 内核 ============
+# 训练/加载/匹配的完整实现。不依赖 Python / NumPy, Python(通过 pybind 薄壳) 与
+# C#(通过 c_api 的 C ABI) 共用这一份代码。
+add_library(${PROJECT_NAME}_core STATIC
+    line2Dup.cpp
+    core/matcher_core.cpp
+)
+target_include_directories(${PROJECT_NAME}_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core")
+target_link_libraries(${PROJECT_NAME}_core PUBLIC ${OpenCV_LIBS} cuda_icp)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(${PROJECT_NAME}_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+# OpenCV 运行时 DLL 所在目录 (供 pybind 模块与 C ABI 模块拷贝依赖)
+set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
+
+# 把 OpenCV 运行时拷到目标旁边, 保证加载时能找到
+function(sbm_copy_opencv_runtime target_name)
+    if(EXISTS "${OpenCV_RUNTIME_BIN}")
+        file(GLOB _opencv_dlls "${OpenCV_RUNTIME_BIN}/*.dll")
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_opencv_dlls} $<TARGET_FILE_DIR:${target_name}>
+            COMMAND_EXPAND_LISTS
+        )
+    endif()
+endfunction()
+
+# ============ C ABI (供 C# P/Invoke, 也可被其它语言直接链接) ============
+option(USE_C_ABI "Build shape_based_matching_c.dll for C# / other languages" ON)
+if (USE_C_ABI)
+    add_library(${PROJECT_NAME}_c SHARED c_api/matcher_c.cpp)
+    target_include_directories(${PROJECT_NAME}_c PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/c_api"
+    )
+    target_link_libraries(${PROJECT_NAME}_c PRIVATE ${PROJECT_NAME}_core)
+    if(MSVC)
+        # 与 pybind 模块一致: Debug 也用 release CRT(/MD)
+        target_compile_options(${PROJECT_NAME}_c PRIVATE "$<$<CONFIG:Debug>:/MD>")
+    endif()
+    sbm_copy_opencv_runtime(${PROJECT_NAME}_c)
+endif()
+
 # 涂抹制模 demo(用 mask_painter.h 交互式生成 object_mask)
 add_executable(paint_mask_demo paint_mask_demo.cpp line2Dup.cpp)
 target_link_libraries(paint_mask_demo ${OpenCV_LIBS} cuda_icp)
@@ -231,13 +275,13 @@ if (USE_PYBIND)
         message(FATAL_ERROR "NumPy not found for ${Python3_EXECUTABLE}. Run: \"${Python3_EXECUTABLE}\" -m pip install numpy")
     endif()
 
-    # ---------- 5. 编译 pybind 模块 ----------
+    # ---------- 5. 编译 pybind 模块 (薄壳, 逻辑在 _core 里) ----------
     set(SOURCE_PYBIND
         pybind11/pybind11.cpp
         pybind11/py_matcher.cpp
         pybind11/np2mat/ndarray_converter.cpp
     )
-    pybind11_add_module(${PROJECT_NAME}_py line2Dup.cpp ${SOURCE_PYBIND})
+    pybind11_add_module(${PROJECT_NAME}_py ${SOURCE_PYBIND})
     if(MSVC)
         # 追加在 pybind11_add_module 自动的 /MDd 之后，保证 /MD 生效
         target_compile_options(${PROJECT_NAME}_py PRIVATE "$<$<CONFIG:Debug>:/MD>")
@@ -245,22 +289,19 @@ if (USE_PYBIND)
     if(WIN32)
         target_link_directories(${PROJECT_NAME}_py PRIVATE "${PY_DEBUG_LIB_DIR}")
     endif()
-    target_link_libraries(${PROJECT_NAME}_py PRIVATE ${OpenCV_LIBS} cuda_icp)
+    target_link_libraries(${PROJECT_NAME}_py PRIVATE
+        ${PROJECT_NAME}_core        # 纯 C++ 内核 (静态链接, 不含 Python 依赖)
+        ${OpenCV_LIBS}
+        cuda_icp
+    )
     if(OpenMP_CXX_FOUND)
         target_link_libraries(${PROJECT_NAME}_py PRIVATE OpenMP::OpenMP_CXX)
     endif()
     target_include_directories(${PROJECT_NAME}_py PRIVATE
         ${PYTHON_NUMPY_INCLUDE_DIR}
+        "${CMAKE_CURRENT_SOURCE_DIR}/core"
     )
 
     # 构建后把 OpenCV DLL 复制到模块旁边，保证 import 时能加载
-    set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
-    if(EXISTS "${OpenCV_RUNTIME_BIN}")
-        file(GLOB OpenCV_RUNTIME_DLLS "${OpenCV_RUNTIME_BIN}/*.dll")
-        add_custom_command(TARGET ${PROJECT_NAME}_py POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${OpenCV_RUNTIME_DLLS} $<TARGET_FILE_DIR:${PROJECT_NAME}_py>
-            COMMAND_EXPAND_LISTS
-        )
-    endif()
+    sbm_copy_opencv_runtime(${PROJECT_NAME}_py)
 endif()
