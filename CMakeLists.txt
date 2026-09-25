@@ -234,6 +234,7 @@ if (USE_PYBIND)
     # ---------- 5. 编译 pybind 模块 ----------
     set(SOURCE_PYBIND
         pybind11/pybind11.cpp
+        pybind11/py_matcher.cpp
         pybind11/np2mat/ndarray_converter.cpp
     )
     pybind11_add_module(${PROJECT_NAME}_py line2Dup.cpp ${SOURCE_PYBIND})

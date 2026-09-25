@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include "np2mat/ndarray_converter.h"
 #include "../line2Dup.h"
+#include "py_matcher.h"
 namespace py = pybind11;
 
 PYBIND11_MODULE(shape_based_matching_py, m) {
@@ -141,4 +142,26 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
             py::arg("info"))
         .def("mask_of", &shape_based_matching::shapeInfo_producer::mask_of,
             py::arg("info"));
+
+    // ============ 高层门面: 训练/加载/匹配一站式封装 (原 matcher.py 逻辑) ============
+    py::class_<PyMatcher>(m, "PyMatcher")
+        .def(py::init<>())
+        .def("clear", &PyMatcher::clear)
+        .def("train", &PyMatcher::train,
+            py::arg("train_image"), py::arg("roi"), py::arg("class_id"),
+            py::arg("train_params"), py::arg("save_dir") = ".",
+            py::arg("exclusion_zones") = py::none())
+        .def("add_template_class", &PyMatcher::add_template_class,
+            py::arg("path"), py::arg("override_params") = py::none())
+        .def("get_loaded_class_ids", &PyMatcher::get_loaded_class_ids)
+        .def("get_base_template_features", &PyMatcher::get_base_template_features,
+            py::arg("class_id"))
+        .def("match", &PyMatcher::match,
+            py::arg("image"), py::arg("score_threshold"),
+            py::arg("class_ids_to_match") = py::none(),
+            py::arg("use_nms") = true, py::arg("nms_threshold") = 0.5,
+            py::arg("grasp_points_config") = py::none(),
+            py::arg("max_matches") = 0, py::arg("min_fitness") = 0.0,
+            py::arg("use_refine") = true, py::arg("max_overlap") = 1.0,
+            py::arg("masks") = py::none(), py::arg("fill_overlap") = true);
 }

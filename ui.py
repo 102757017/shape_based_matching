@@ -730,13 +730,15 @@ class TemplateMatchingApp(QMainWindow):
             )
             if result:
                 x, y, w, h = self.roi_rect.getRect()
+                # 先清结果表(会把预览图还原成原始训练图), 再叠加特征点预览,
+                # 否则 clear_results_table 会把刚贴上去的特征点抹掉
+                self.clear_results_table()
                 self.current_cv_image = self.original_image_for_display.copy()
                 self.current_cv_image[y:y+h, x:x+w] = result['features_image']
                 self.display_image(self.current_cv_image)
                 files = [os.path.basename(result['yaml_path']), os.path.basename(result['info_path'])]
                 if result.get('preview_path'): files.append(os.path.basename(result['preview_path']))
                 files.append(os.path.basename(result['yaml_path']).replace('.yaml', '.jpg'))
-                self.clear_results_table()  # 训练会改写预览图, 旧匹配结果不再对应画面
                 self.update_status(f"训练成功, 保存目录: {result['save_dir']} | {', '.join(files)}", "success")
                 logging.getLogger('ui').info(f"模板产物: {result}")
         except (ValueError, RuntimeError) as e: self.update_status(f"训练失败: {e}", "fail")
