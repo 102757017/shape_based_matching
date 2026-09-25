@@ -7,12 +7,22 @@ namespace py = pybind11;
 PYBIND11_MODULE(shape_based_matching_py, m) {
     NDArrayConverter::init_numpy();
 
-    // 1. °ó¶¨½á¹û½á¹¹Ìå
+    // 1. ç»‘å®šç»“æœç»“æ„ä½“
     py::class_<line2Dup::RegistrationResult>(m, "RegistrationResult")
         .def(py::init<>())
         .def_readwrite("transformation", &line2Dup::RegistrationResult::transformation)
         .def_readwrite("fitness", &line2Dup::RegistrationResult::fitness)
         .def_readwrite("inlier_rmse", &line2Dup::RegistrationResult::inlier_rmse);
+
+    py::class_<line2Dup::OverlapResult>(m, "OverlapResult")
+        .def(py::init<>())
+        .def_readwrite("iou", &line2Dup::OverlapResult::iou)
+        .def_readwrite("inter_area", &line2Dup::OverlapResult::inter_area)
+        .def_readwrite("union_area", &line2Dup::OverlapResult::union_area)
+        .def_readwrite("pred_area", &line2Dup::OverlapResult::pred_area)
+        .def_readwrite("gt_area", &line2Dup::OverlapResult::gt_area)
+        .def_property_readonly("precision", &line2Dup::OverlapResult::precision)
+        .def_property_readonly("recall", &line2Dup::OverlapResult::recall);
 
     py::class_<line2Dup::Match>(m, "Match")
         .def(py::init<>())
@@ -51,7 +61,7 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def("addTemplate_rotate", &line2Dup::Detector::addTemplate_rotate,
             py::arg("class_id"), py::arg("zero_id"), py::arg("theta"), py::arg("center"))
         .def("writeClasses", &line2Dup::Detector::writeClasses, py::arg("format") = "templates_%s.yml.gz")
-        // ĞŞ¸´ clear_classes µÄ°ó¶¨
+        // ä¿®å¤ clear_classes çš„ç»‘å®š
         .def("clear_classes", static_cast<void (line2Dup::Detector::*)()>(&line2Dup::Detector::clear_classes))
         .def("readClasses", &line2Dup::Detector::readClasses,
             py::arg("class_ids") = std::vector<std::string>(), py::arg("format") = "templates_%s.yml.gz")
@@ -63,9 +73,17 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def("classIds", &line2Dup::Detector::classIds)
         .def_readwrite("dx_", &line2Dup::Detector::dx_)
         .def_readwrite("dy_", &line2Dup::Detector::dy_)
-        .def("refine", &line2Dup::Detector::refine, py::arg("match"));
+        .def("refine", &line2Dup::Detector::refine, py::arg("match"))
+        .def("getTemplateMask", &line2Dup::Detector::getTemplateMask,
+            py::arg("class_id"), py::arg("template_id"),
+            py::return_value_policy::reference_internal)
+        .def("setTemplateMask", &line2Dup::Detector::setTemplateMask,
+            py::arg("class_id"), py::arg("template_id"), py::arg("mask"))
+        .def("computeIoU", &line2Dup::Detector::computeIoU,
+            py::arg("match"), py::arg("gt_mask"),
+            py::arg("templ_mask") = cv::Mat(), py::arg("use_refine") = true);
 
-    // InfoÊÇshapeInfo_producerµÄÇ¶Ì×Àà
+    // Infoæ˜¯shapeInfo_producerçš„åµŒå¥—ç±»
     py::class_<shape_based_matching::shapeInfo_producer::Info>(m, "Info")
         .def(py::init<>())
         .def(py::init<float, float>())

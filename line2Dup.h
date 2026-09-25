@@ -39,9 +39,21 @@ namespace line2Dup
     };
 
     struct RegistrationResult {
-        std::vector<std::vector<float>> transformation; // 3x3 ����
+        std::vector<std::vector<float>> transformation; // 3x3 矩阵
         float fitness;
         float inlier_rmse;
+    };
+
+    // 匹配结果与实际目标的重叠度(mask 面积交并比)
+    struct OverlapResult {
+        float iou = 0.f;         // 交集 / 并集, 0~1
+        float inter_area = 0.f;  // 交集像素数
+        float union_area = 0.f;  // 并集像素数
+        float pred_area = 0.f;   // 预测 mask 像素数(可用于 precision = inter/pred)
+        float gt_area = 0.f;     // 真值 mask 像素数(可用于 recall = inter/gt)
+
+        float precision() const { return pred_area > 0 ? inter_area / pred_area : 0.f; }
+        float recall() const { return gt_area > 0 ? inter_area / gt_area : 0.f; }
     };
 
     class ColorGradientPyramid
@@ -178,6 +190,23 @@ namespace line2Dup
 
         const std::vector<Template>& getTemplates(const std::string& class_id, int template_id) const;
 
+        // 训练时用的 mask, 与 template_id 一一对应(空表示未记录, 例如从 yaml 读入的模板)
+        const cv::Mat& getTemplateMask(const std::string& class_id, int template_id) const;
+        // 从 yaml 读入模板后, 可用它补登记对应的 mask
+        void setTemplateMask(const std::string& class_id, int template_id, const cv::Mat& mask);
+
+        /**
+         * \brief 计算某个 match 与真值 mask 的重叠度(IoU)
+         * \param match        match() 返回的结果
+         * \param gt_mask      场景图中目标的真值 mask(CV_8UC1, 非0即前景)
+         * \param templ_mask   该 template 对应的训练 mask, 应与当时的训练 src 同尺寸;
+         *                     留空则用 Detector 内部缓存的那份(addTemplate 时自动记录)
+         * \param use_refine   true: 先跑 icp 精修再算; false: 只用 match 的平移
+         * \return OverlapResult, 若失败(无 mask / 尺寸不符)返回全 0
+         */
+        OverlapResult computeIoU(const Match& match, const cv::Mat& gt_mask,
+            const cv::Mat& templ_mask = cv::Mat(), bool use_refine = true);
+
         int numTemplates() const;
         int numTemplates(const std::string& class_id) const;
         int numClasses() const { return static_cast<int>(class_templates.size()); }
@@ -194,8 +223,8 @@ namespace line2Dup
             const std::string& format = "templates_%s.yml.gz");
         void writeClasses(const std::string& format = "templates_%s.yml.gz") const;
 
-        // ���� clear_classes ����
-        void clear_classes() { class_templates.clear(); }
+        // 添加 clear_classes 方法(同时清掉训练 mask 缓存)
+        void clear_classes() { class_templates.clear(); class_masks.clear(); }
 
         cv::Mat dx_, dy_; // dx dy recorded for icp
 
@@ -210,6 +239,9 @@ namespace line2Dup
         typedef std::vector<Template> TemplatePyramid;
         typedef std::map<std::string, std::vector<TemplatePyramid>> TemplatesMap;
         TemplatesMap class_templates;
+
+        // 与 class_templates 平行的训练 mask 缓存: [class_id][template_id]
+        std::map<std::string, std::vector<cv::Mat>> class_masks;
 
         typedef std::vector<cv::Mat> LinearMemories;
         // Indexed as [pyramid level][ColorGradient][quantized label]
@@ -242,7 +274,7 @@ namespace shape_based_matching {
             float angle;
             float scale;
 
-            Info() : angle(0), scale(1) {}  // ����Ĭ�Ϲ��캯��
+            Info() : angle(0), scale(1) {}  // 添加默认构造函数
             Info(float angle_, float scale_) {
                 angle = angle_;
                 scale = scale_;
@@ -250,7 +282,7 @@ namespace shape_based_matching {
         };
         std::vector<Info> infos;
 
-        // ����Ĭ�Ϲ��캯��
+        // 添加默认构造函数
         shapeInfo_producer() {}
 
         shapeInfo_producer(cv::Mat src, cv::Mat mask = cv::Mat()) {

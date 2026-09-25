@@ -1336,6 +1336,19 @@ int Detector::addTemplate(const Mat source, const std::string &class_id,
 
     /// @todo Can probably avoid a copy of tp here with swap
     template_pyramids.push_back(tp);
+
+    // 记录训练 mask, 供 computeIoU 使用
+    {
+        std::vector<Mat>& masks = class_masks[class_id];
+        Mat to_save;
+        if (object_mask.empty())
+            to_save = Mat(source.size(), CV_8UC1, Scalar::all(255));
+        else
+            to_save = object_mask.clone();
+        CV_Assert(masks.size() == size_t(template_id));
+        masks.push_back(to_save);
+    }
+
     return template_id;
 }
 
@@ -1394,6 +1407,22 @@ int Detector::addTemplate_rotate(const string &class_id, int zero_id,
     cropTemplates(tp);
 
     template_pyramids.push_back(tp);
+
+    // 同步旋转训练 mask, 保持与 template_id 的对应关系
+    {
+        std::vector<Mat>& masks = class_masks[class_id];
+        Mat rotated;
+        if (masks.size() > size_t(zero_id) && !masks[zero_id].empty())
+        {
+            // 与上面 feature 的旋转保持一致:
+            // rotatePoint(p, center, -theta) 等价于 getRotationMatrix2D(center, theta, 1)
+            Mat rot_mat = getRotationMatrix2D(center, theta, 1.0);
+            warpAffine(masks[zero_id], rotated, rot_mat, masks[zero_id].size());
+        }
+        CV_Assert(masks.size() == size_t(template_id));
+        masks.push_back(rotated);
+    }
+
     return template_id;
 }
 const std::vector<Template> &Detector::getTemplates(const std::string &class_id, int template_id) const
@@ -1402,6 +1431,92 @@ const std::vector<Template> &Detector::getTemplates(const std::string &class_id,
     CV_Assert(i != class_templates.end());
     CV_Assert(i->second.size() > size_t(template_id));
     return i->second[template_id];
+}
+
+const Mat &Detector::getTemplateMask(const std::string &class_id, int template_id) const
+{
+    static const Mat empty_mat;
+
+    std::map<std::string, std::vector<Mat>>::const_iterator i = class_masks.find(class_id);
+    if (i == class_masks.end())
+        return empty_mat;
+    if (i->second.size() <= size_t(template_id))
+        return empty_mat;
+    return i->second[template_id];
+}
+
+void Detector::setTemplateMask(const std::string &class_id, int template_id, const Mat &mask)
+{
+    std::vector<Mat> &masks = class_masks[class_id];
+    if (masks.size() <= size_t(template_id))
+        masks.resize(size_t(template_id) + 1);
+    masks[template_id] = mask.empty() ? Mat() : mask.clone();
+}
+
+OverlapResult Detector::computeIoU(const Match &match, const Mat &gt_mask,
+                                   const Mat &templ_mask, bool use_refine)
+{
+    OverlapResult res;
+
+    CV_Assert(!gt_mask.empty());
+    CV_Assert(gt_mask.channels() == 1);
+
+    const std::vector<Template> &templ_pyramid = getTemplates(match.class_id, match.template_id);
+    const Template &t = templ_pyramid[0];
+
+    Mat tm = templ_mask.empty() ? getTemplateMask(match.class_id, match.template_id) : templ_mask;
+    CV_Assert(!tm.empty());  // 需要训练 mask 才能算面积重叠
+
+    // 1. 把整幅训练 mask 铺到场景图上
+    //    templ_mask 与训练 src 同尺寸; cropTemplates 里把 feature 减掉了 tl_x/tl_y,
+    //    所以模板包围盒左上角在训练图中的坐标是 (tl_x, tl_y), 而 match.x/y 是它在场景中的坐标。
+    //    于是训练图原点对应场景 (match.x - tl_x, match.y - tl_y)。
+    Mat mask0 = Mat::zeros(gt_mask.size(), CV_8UC1);
+    int px = match.x - t.tl_x;
+    int py = match.y - t.tl_y;
+    int sx = std::max(px, 0), sy = std::max(py, 0);
+    int ex = std::min(px + tm.cols, gt_mask.cols);
+    int ey = std::min(py + tm.rows, gt_mask.rows);
+    if (ex > sx && ey > sy)
+    {
+        Rect src_rect(sx - px, sy - py, ex - sx, ey - sy);
+        Rect dst_rect(sx, sy, ex - sx, ey - sy);
+        tm(src_rect).copyTo(mask0(dst_rect));
+    }
+
+    // 3. 求变换
+    //    注意 warpAffine 的 M 是反向映射: dst(x,y) = src(M * (x,y,1)^T),
+    //    而 refine() 返回的 T 是正向的(model -> scene), 所以这里要用 T 的逆。
+    //    use_refine == false 时 mask0 已经摆到位, 恒等变换即可。
+    Mat affine = Mat::eye(2, 3, CV_32F);
+    if (use_refine)
+    {
+        RegistrationResult reg = refine(match);  // 依赖 match() 填充的 dx_/dy_
+        CV_Assert(reg.transformation.size() >= 3);
+        Mat T = Mat::eye(3, 3, CV_32F);
+        for (int r = 0; r < 3; ++r)
+        {
+            CV_Assert(reg.transformation[r].size() >= 3);
+            for (int c = 0; c < 3; ++c)
+                T.at<float>(r, c) = reg.transformation[r][c];
+        }
+        Mat T_inv = T.inv();
+        affine = T_inv(Rect(0, 0, 3, 2)).clone();
+    }
+
+    // 4. warp 后与真值求交并比
+    Mat pred;
+    warpAffine(mask0, pred, affine, gt_mask.size(), INTER_NEAREST);
+    Mat pred_bin = pred > 0;
+    Mat gt_bin = gt_mask > 0;
+
+    res.inter_area = static_cast<float>(countNonZero(pred_bin & gt_bin));
+    res.union_area = static_cast<float>(countNonZero(pred_bin | gt_bin));
+    res.pred_area = static_cast<float>(countNonZero(pred_bin));
+    res.gt_area = static_cast<float>(countNonZero(gt_bin));
+    res.iou = res.union_area > 0 ? res.inter_area / res.union_area : 0.f;
+
+    return res;
 }
 
 int Detector::numTemplates() const
@@ -1546,11 +1661,11 @@ void Detector::writeClasses(const std::string &format) const
 
 RegistrationResult Detector::refine(const Match& match) {
 
-    // 1. ��ȡģ��
+    // 1. 取模板
     const std::vector<Template>& templ_pyramid = getTemplates(match.class_id, match.template_id);
     const Template& templ = templ_pyramid[0];
-    // 2. ׼������ (ʹ��ȫ�������ռ�� Vec2f)
-    // ע�������� ::Vec2f ������ cuda_icp::Vec2f
+    // 2. 准备点云 (使用全局命名空间的 Vec2f)
+    // 注意区分全局 ::Vec2f 与 cuda_icp::Vec2f
     std::vector<::Vec2f> model_pcd(templ.features.size());
     for (size_t i = 0; i < templ.features.size(); i++) {
         model_pcd[i] = {
@@ -1558,20 +1673,20 @@ RegistrationResult Detector::refine(const Match& match) {
             float(templ.features[i].y + match.y)
         };
     }
-    // 3. ��������
-    // ���� test.cpp����Щ��ͨ����ȫ�ֿռ�
+    // 3. 准备场景
+    // 参考 test.cpp, 这两个类型通常在全局命名空间
     ::Scene_kdtree scene;
     ::KDTree_cpu kdtree;
 
     if (this->dx_.empty() || this->dy_.empty()) {
-        // ��������OpenCV ���� StsBadArg �� StsError
+        // 抛出 OpenCV 的 StsBadArg 异常
         CV_Error(cv::Error::StsBadArg, "Gradient maps (dx_, dy_) are empty. Call match() first.");
     }
     scene.init_Scene_kdtree_cpu(this->dx_, this->dy_, kdtree);
-    // 4. ִ�� ICP
-    // ��ȷָ�������ռ� cuda_icp::sim3
+    // 4. 执行 ICP
+    // 明确指定命名空间 cuda_icp::sim3
     cuda_icp::RegistrationResult icp_res = cuda_icp::sim3::ICP2D_Point2Plane_cpu(model_pcd, scene);
-    // 5. ת�����
+    // 5. 转换结果
     RegistrationResult res;
     res.fitness = icp_res.fitness_;
     res.inlier_rmse = icp_res.inlier_rmse_;

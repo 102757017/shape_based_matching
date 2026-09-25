@@ -131,6 +131,13 @@ endif()
 
 add_subdirectory(cuda_icp)
 
+# 涂抹制模 demo(用 mask_painter.h 交互式生成 object_mask)
+add_executable(paint_mask_demo paint_mask_demo.cpp line2Dup.cpp)
+target_link_libraries(paint_mask_demo ${OpenCV_LIBS} cuda_icp)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(paint_mask_demo OpenMP::OpenMP_CXX)
+endif()
+
 # test exe
 add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
 
