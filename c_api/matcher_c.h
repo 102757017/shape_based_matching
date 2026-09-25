@@ -68,6 +68,42 @@ typedef struct sbm_train_result_t {
     sbm_image_t features_image;  /* ROI + 特征点红点图, 指向库内部缓冲 */
 } sbm_train_result_t;
 
+/* ---------------- 阈值自动探测参数 ----------------
+ * sbm_estimate_thresholds 用来按"这张训练图自己"搜出合适的 weak/strong。
+ * 零值一律解释为"用默认", 所以调 sbm_threshold_search_params_init() 拿一份
+ * 填好默认值的结构体是最省事的用法; 想只改其中一项就手动覆盖对应字段。 */
+typedef struct sbm_threshold_search_params_t {
+    int feature_num;                            /* <=0 -> 100 */
+    int pyramid_level_count;                    /* <=0 -> [4, 8] (只影响自检) */
+    int pyramid_levels[SBM_MAX_PYRAMID_LEVELS];
+    double scale_end;                           /* <=0 -> 1.0   (与训练参数一致, 只影响 padding) */
+    double weak_ratio;                          /* <=0 -> 0.5   (弱阈值 = weak_ratio * 强阈值) */
+    double strong_min;                          /* <=0 -> 4.0   (强阈值搜索下界) */
+    double strong_max;                          /* <=0 -> 255.0 (强阈值搜索上界) */
+    int run_self_check;                         /* 0=默认(开) / 1=强制开 / -1=强制关 */
+} sbm_threshold_search_params_t;
+
+/* ---------------- 阈值自动探测结果 ----------------
+ * ok = true 时 weak_thresh / strong_thresh 才是可信的建议值;
+ * ok = false 时这两个数是默认值 30/60, 请直接看 note 判断是图不适合还是 ROI 选得不好。
+ * note 与 features_image 都指向库内部缓冲, 在下一次调用或 sbm_destroy() 前有效,
+ * 调用方不要 free(如需长期持有请自行拷贝)。 */
+typedef struct sbm_threshold_estimate_t {
+    double weak_thresh;
+    double strong_thresh;
+    int ok;
+    /* ---- 诊断信息, 便于人工复核 ---- */
+    int mask_pixels;            /* 参与训练的有效像素数 */
+    int requested_features;     /* 期望特征点数 */
+    int candidates;             /* 该阈值下的候选点数 */
+    int features;               /* 该阈值下实际取到的特征点数 */
+    double median_gradient;     /* 有效区梯度中位数 */
+    double p95_gradient;
+    double self_score;          /* 自匹配自检得分, -1 = 未计算 */
+    const char* note;           /* 库内部缓冲 */
+    sbm_image_t features_image; /* ROI 原图 + 特征点红点, 指向库内部缓冲 */
+} sbm_threshold_estimate_t;
+
 /* ---------------- 匹配结果 ---------------- */
 typedef struct sbm_match_result_t {
     const char* class_id;
@@ -121,6 +157,22 @@ SBM_API const char* sbm_loaded_class_id(void* handle, int index);
 /* 某类别训练时主模板的特征点 (ROI 坐标); 返回写入的点数, 负数为错误码 */
 SBM_API int sbm_base_features(void* handle, const char* class_id,
                               double* out_xy, int max_points);
+
+/* ============================ 阈值自动探测 ============================ */
+/* 按训练图自身的梯度分布给出 weak_thresh / strong_thresh 的建议值。
+ * 传 NULL 给 params 表示用全部默认。zones / positive_mask / negative_mask 与
+ * sbm_train 语义一致(可为 NULL / 空)。返回 0 成功, 负数为错误码。 */
+SBM_API void  sbm_threshold_search_params_init(sbm_threshold_search_params_t* params);
+
+SBM_API int   sbm_estimate_thresholds(void* handle,
+                                      const sbm_image_t* image,
+                                      const int roi[4],                /* x, y, w, h */
+                                      const sbm_threshold_search_params_t* params,
+                                      const sbm_exclusion_zone_t* zones,   /* 可为 NULL */
+                                      int zone_count,
+                                      const sbm_image_t* positive_mask,    /* 可为 NULL */
+                                      const sbm_image_t* negative_mask,    /* 可为 NULL */
+                                      sbm_threshold_estimate_t* out);
 
 /* ============================ 匹配 ============================ */
 /* 抓取点配置: {class_id -> [[x,y],...]} (ROI 坐标), count=0 表示清除该类别配置。

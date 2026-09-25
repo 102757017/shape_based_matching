@@ -4,6 +4,7 @@
 #include "matcher_c.h"
 
 #include <opencv2/core.hpp>
+#include <cstring>
 #include <map>
 #include <string>
 #include <utility>
@@ -24,6 +25,8 @@ struct SbmHandle {
     std::vector<std::vector<double>> grasp_bufs;
     std::map<std::string, std::vector<std::pair<double, double>>> grasp_cfg;
     std::vector<std::string> loaded_ids;
+    std::string last_note;                      // sbm_estimate_thresholds 的返回值
+    cv::Mat est_features_image;                 // 上次探测的特征点标注图 (与训练的那份分开存)
 };
 
 SbmHandle* as_handle(void* h) { return static_cast<SbmHandle*>(h); }
@@ -69,6 +72,27 @@ void params_to_c(const sbm::TrainParams& src, sbm_train_params_t* out) {
     out->scale_start = src.scale_start;
     out->scale_end = src.scale_end;
     out->scale_step = src.scale_step;
+}
+
+// 探测参数 -> 内核选项。约定: C 侧的 0 / 负数一律 meaning "用内核默认值",
+// 这样调用方填一份全零结构体也能拿到合理结果。
+sbm::ThresholdSearchOptions search_options_from_c(const sbm_threshold_search_params_t& p) {
+    sbm::ThresholdSearchOptions opt;                 // 一份默认值
+    opt.feature_num = p.feature_num > 0 ? p.feature_num : opt.feature_num;
+    int n = p.pyramid_level_count;
+    if (n > 0) {
+        if (n > SBM_MAX_PYRAMID_LEVELS) n = SBM_MAX_PYRAMID_LEVELS;
+        opt.pyramid_levels.assign(p.pyramid_levels, p.pyramid_levels + n);
+    } else {
+        opt.pyramid_levels.clear();                  // 内核会退回 {4, 8}
+    }
+    if (p.scale_end > 0.0) opt.scale_end = static_cast<float>(p.scale_end);
+    if (p.weak_ratio > 0.0) opt.weak_ratio = static_cast<float>(p.weak_ratio);
+    if (p.strong_min > 0.0) opt.strong_min = static_cast<float>(p.strong_min);
+    if (p.strong_max > 0.0) opt.strong_max = static_cast<float>(p.strong_max);
+    if (p.run_self_check > 0) opt.run_self_check = true;
+    else if (p.run_self_check < 0) opt.run_self_check = false;
+    return opt;
 }
 
 }  // namespace
@@ -229,6 +253,79 @@ int sbm_base_features(void* handle, const char* class_id, double* out_xy, int ma
     } catch (const std::exception& e) {
         h->last_error = e.what();
         return -2;
+    }
+}
+
+void sbm_threshold_search_params_init(sbm_threshold_search_params_t* params) {
+    if (!params) return;
+    // 全部从内核的结构体默认值派生, 免得两边默认值写歪了还不一致
+    sbm::ThresholdSearchOptions d;
+    std::memset(params, 0, sizeof(*params));
+    params->feature_num = d.feature_num;
+    params->pyramid_level_count = static_cast<int>(d.pyramid_levels.size());
+    for (size_t i = 0; i < d.pyramid_levels.size(); ++i)
+        params->pyramid_levels[i] = d.pyramid_levels[i];
+    params->scale_end = d.scale_end;
+    params->weak_ratio = d.weak_ratio;
+    params->strong_min = d.strong_min;
+    params->strong_max = d.strong_max;
+    params->run_self_check = 1;
+}
+
+int sbm_estimate_thresholds(void* handle, const sbm_image_t* image, const int roi[4],
+                            const sbm_threshold_search_params_t* params,
+                            const sbm_exclusion_zone_t* zones, int zone_count,
+                            const sbm_image_t* positive_mask, const sbm_image_t* negative_mask,
+                            sbm_threshold_estimate_t* out) {
+    SbmHandle* h = as_handle(handle);
+    if (!h || !out || !roi) return -1;
+    try {
+        std::vector<int> roi_v{roi[0], roi[1], roi[2], roi[3]};
+
+        std::vector<sbm::ExclusionZone> zone_v;
+        if (zones && zone_count > 0) {
+            for (int i = 0; i < zone_count; ++i) {
+                sbm::ExclusionZone z;
+                z.type = zones[i].type ? zones[i].type : "exclude_rect";
+                z.x = zones[i].x; z.y = zones[i].y; z.w = zones[i].w; z.h = zones[i].h;
+                zone_v.push_back(std::move(z));
+            }
+        }
+
+        sbm::ThresholdEstimate r = sbm::estimate_train_thresholds(
+            image_to_mat(image), roi_v,
+            image_to_mat(positive_mask), image_to_mat(negative_mask),
+            zone_v,
+            params ? search_options_from_c(*params) : sbm::ThresholdSearchOptions());
+
+        // note / 标注图都存进句柄, 再让 out 指向它们 (下次调用或 destroy 前有效)
+        h->last_note = r.note;
+        h->est_features_image = r.features_image.clone();
+
+        out->weak_thresh = r.weak_thresh;
+        out->strong_thresh = r.strong_thresh;
+        out->ok = r.ok ? 1 : 0;
+        out->mask_pixels = r.mask_pixels;
+        out->requested_features = r.requested_features;
+        out->candidates = r.candidates;
+        out->features = r.features;
+        out->median_gradient = r.median_gradient;
+        out->p95_gradient = r.p95_gradient;
+        out->self_score = r.self_score;
+        out->note = h->last_note.c_str();
+        out->features_image.data = h->est_features_image.data;
+        out->features_image.width = h->est_features_image.cols;
+        out->features_image.height = h->est_features_image.rows;
+        out->features_image.channels = h->est_features_image.channels();
+        out->features_image.step = h->est_features_image.empty()
+            ? 0 : static_cast<int>(h->est_features_image.step[0]);
+        return 0;
+    } catch (const std::exception& e) {
+        h->last_error = e.what();
+        return -2;
+    } catch (...) {
+        h->last_error = "unknown error in sbm_estimate_thresholds";
+        return -3;
     }
 }
 

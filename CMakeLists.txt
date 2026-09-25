@@ -185,6 +185,7 @@ add_subdirectory(cuda_icp)
 add_library(${PROJECT_NAME}_core STATIC
     line2Dup.cpp
     core/matcher_core.cpp
+    core/auto_threshold.cpp      # 训练阈值(弱/强)自动探测
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core")
 target_link_libraries(${PROJECT_NAME}_core PUBLIC ${OpenCV_LIBS} cuda_icp)

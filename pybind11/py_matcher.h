@@ -51,6 +51,18 @@ public:
 
     py::list get_base_template_features(const std::string& class_id) const;
 
+    /// 自动探测训练图(ROI)合适的弱/强阈值 (对应 sbm::estimate_train_thresholds)
+    /// :param train_image 训练图 (灰度或 BGR)
+    /// :param roi         [x, y, w, h]
+    /// :param options     dict, 可选: feature_num / pyramid_levels / scale_end /
+    ///                    weak_ratio / strong_min / strong_max / run_self_check
+    /// :return dict: weak_thresh / strong_thresh / ok / candidates / features /
+    ///               requested_features / median_gradient / p95_gradient /
+    ///               self_score / note / features_image
+    py::dict estimate_thresholds(const cv::Mat& train_image, std::vector<int> roi,
+                                 py::object positive_mask, py::object negative_mask,
+                                 py::object exclusion_zones, py::object options);
+
     /// 执行模板匹配 (对应旧 Matcher.match), 返回 dict 列表
     py::list match(const cv::Mat& image, double score_threshold,
                    py::object class_ids_to_match,

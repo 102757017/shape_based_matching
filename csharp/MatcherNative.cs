@@ -12,6 +12,19 @@
  *
  * 注意: 字符串一律手工按 UTF-8 封送 —— 默认 CharSet.Ansi 会走系统代码页(GBK),
  * 中文类别名/目录会乱码。
+ *
+ * 自动探测训练阈值(省去逐图手调弱/强阈值):
+ *     ThresholdSearchParams sp = ThresholdSearchParams.Default();
+ *     sp.FeatureNum = 128;
+ *     ThresholdEstimate est = matcher.EstimateThresholds(img, new[] { x, y, w, h },
+ *                                                        sp, zones, null, null);
+ *     if (est.Ok) {
+ *         params.WeakThresh = est.WeakThresh;
+ *         params.StrongThresh = est.StrongThresh;
+ *     } else {
+ *         // est.Note 会说明是 ROI 选得不好还是图本身没什么梯度
+ *     }
+ *     matcher.Train(img, new[] { x, y, w, h }, classId, params, saveDir, zones, null, null);
  * ==========================================================================*/
 using System;
 using System.Collections.Generic;
@@ -84,6 +97,64 @@ namespace ShapeBasedMatching
         public byte[] FeaturesImage;
     }
 
+    /// <summary>阈值自动探测参数 (对应 sbm_threshold_search_params_t)。
+    /// 零值一律解释为"用默认", 拿不准就调 Default()。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ThresholdSearchParams
+    {
+        public int FeatureNum;                              // <=0 -> 100
+        public int PyramidLevelCount;                      // <=0 -> [4, 8]
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
+        public int[] PyramidLevels;
+        public double ScaleEnd;                             // <=0 -> 1.0
+        public double WeakRatio;                            // <=0 -> 0.5 (弱 = 弱比例 * 强)
+        public double StrongMin;                            // <=0 -> 4.0
+        public double StrongMax;                            // <=0 -> 255.0
+        /// <summary>0=默认(开) / 1=强制开 / -1=强制关</summary>
+        [MarshalAs(UnmanagedType.I4)]
+        public int RunSelfCheck;
+
+        /// <summary>一份与 C++ 侧一致的默认参数</summary>
+        public static ThresholdSearchParams Default()
+        {
+            // 先把金字塔数组备好, 免得 marshal 一个 null 的 ByValArray
+            ThresholdSearchParams p = new ThresholdSearchParams
+            {
+                PyramidLevels = new int[8],
+            };
+            Native.sbm_threshold_search_params_init(ref p);
+            return p;
+        }
+    }
+
+    /// <summary>阈值自动探测结果 (对应 sbm_threshold_estimate_t)。
+    /// Ok = false 时 WeakThresh / StrongThresh 是默认值 30/60, 请直接看 Note。</summary>
+    public sealed class ThresholdEstimate
+    {
+        public double WeakThresh;
+        public double StrongThresh;
+        /// <summary>true = 这两个阈值是可信建议值; false = 图本身给不出可信建议</summary>
+        public bool Ok;
+        /// <summary>参与训练的有效像素数</summary>
+        public int MaskPixels;
+        public int RequestedFeatures;
+        public int Candidates;              // 该阈值下的候选点数
+        public int Features;                // 该阈值下实际取到的特征点数
+        public double MedianGradient;
+        public double P95Gradient;
+        /// <summary>自匹配自检得分, &lt; 0 表示未计算</summary>
+        public double SelfScore;
+        /// <summary>提示语 (含诊断数据与兜底建议)</summary>
+        public string Note;
+        /// <summary>特征点标注图宽 (等于 ROI 宽)</summary>
+        public int FeaturesWidth;
+        public int FeaturesHeight;
+        public int FeaturesChannels;        // 与输入一致: 1 灰度 / 3 BGR
+        /// <summary>特征点标注图像素 (行优先, 已去掉行对齐)。
+        /// 在 EstimateThresholds 返回前就拷进托管内存了, 句柄释放后依然可用。</summary>
+        public byte[] FeaturesImage;
+    }
+
     /// <summary>匹配结果</summary>
     public sealed class MatchResult
     {
@@ -128,6 +199,89 @@ namespace ShapeBasedMatching
             for (int i = 0; i < n; i++)
                 list.Add(Utf8.PtrToString(Native.sbm_loaded_class_id(_handle, i)));
             return list;
+        }
+
+        /// <summary>自动探测某张训练图 (ROI 区域) 合适的弱/强阈值, 省去逐图手调。
+        /// 建议在 Train 之前调用: 把返回的 WeakThresh / StrongThresh 填进 TrainParams 即可。
+        /// Ok = false 时只给诊断说明, 不给建议值(此时 Weak/Strong 是默认的 30/60)。</summary>
+        public ThresholdEstimate EstimateThresholds(RawImage image, int[] roi,
+                                                    ThresholdSearchParams p, ExclusionZone[] zones,
+                                                    RawImage? positiveMask, RawImage? negativeMask)
+        {
+            if (roi == null || roi.Length != 4) throw new ArgumentException("roi 必须是 [x, y, w, h]");
+            // 调用方可能只改了少量字段就直接传进来, 金字塔数组得先备好
+            if (p.PyramidLevels == null)
+            {
+                ThresholdSearchParams d = ThresholdSearchParams.Default();
+                p.PyramidLevels = d.PyramidLevels;
+                p.PyramidLevelCount = d.PyramidLevelCount;
+            }
+
+            IntPtr zonePtr = IntPtr.Zero;
+            List<Utf8> zoneNames = new List<Utf8>();
+            Native.SbmThresholdEstimate native = new Native.SbmThresholdEstimate();
+            int rc;
+            try
+            {
+                if (zones != null && zones.Length > 0)
+                {
+                    int size = Marshal.SizeOf(typeof(Native.SbmExclusionZone));
+                    zonePtr = Marshal.AllocHGlobal(size * zones.Length);
+                    for (int i = 0; i < zones.Length; i++)
+                    {
+                        Utf8 type = new Utf8(zones[i].Type ?? "exclude_rect");
+                        zoneNames.Add(type);
+                        Native.SbmExclusionZone z = new Native.SbmExclusionZone();
+                        z.Type = type;
+                        z.X = zones[i].X; z.Y = zones[i].Y; z.W = zones[i].W; z.H = zones[i].H;
+                        Marshal.StructureToPtr(z, zonePtr + i * size, false);
+                    }
+                }
+
+                using (UnmanagedStruct<RawImage> img = new UnmanagedStruct<RawImage>(image))
+                using (UnmanagedStruct<RawImage> pos = UnmanagedStruct<RawImage>.Create(positiveMask))
+                using (UnmanagedStruct<RawImage> neg = UnmanagedStruct<RawImage>.Create(negativeMask))
+                using (UnmanagedStruct<Native.SbmThresholdEstimate> res =
+                       new UnmanagedStruct<Native.SbmThresholdEstimate>())
+                {
+                    rc = Native.sbm_estimate_thresholds(_handle, img.Ptr, roi, ref p, zonePtr,
+                                                        zones == null ? 0 : zones.Length,
+                                                        pos.Ptr, neg.Ptr, res.Ptr);
+                    native = res.Read();
+                }
+            }
+            finally
+            {
+                foreach (Utf8 t in zoneNames) t.Dispose();
+                if (zonePtr != IntPtr.Zero) Marshal.FreeHGlobal(zonePtr);
+            }
+            CheckResult(rc, "sbm_estimate_thresholds");
+
+            // 标注图必须在这里立刻拷走: 它指向库内部缓冲, 句柄销毁后就失效了
+            byte[] pixels = CopyImageBytes(native.FeaturesImage);
+            int fw = native.FeaturesImage.Width;
+            int fh = native.FeaturesImage.Height;
+            int fch = native.FeaturesImage.Channels;
+            if (fw <= 0 || fh <= 0) { fw = 0; fh = 0; fch = 0; }
+
+            return new ThresholdEstimate
+            {
+                WeakThresh = native.WeakThresh,
+                StrongThresh = native.StrongThresh,
+                Ok = native.Ok != 0,
+                MaskPixels = native.MaskPixels,
+                RequestedFeatures = native.RequestedFeatures,
+                Candidates = native.Candidates,
+                Features = native.Features,
+                MedianGradient = native.MedianGradient,
+                P95Gradient = native.P95Gradient,
+                SelfScore = native.SelfScore,
+                Note = Utf8.PtrToString(native.Note),
+                FeaturesWidth = fw,
+                FeaturesHeight = fh,
+                FeaturesChannels = fch,
+                FeaturesImage = pixels,
+            };
         }
 
         /// <summary>训练并保存模板。classId / saveDir 支持中文。</summary>
@@ -179,27 +333,11 @@ namespace ShapeBasedMatching
             CheckResult(rc, "sbm_train");
 
             // 标注图必须在这里立刻拷走: 它指向库内部缓冲, 句柄销毁后就失效了
-            byte[] pixels = null;
+            byte[] pixels = CopyImageBytes(native.FeaturesImage);
             int fw = native.FeaturesImage.Width;
             int fh = native.FeaturesImage.Height;
             int fch = native.FeaturesImage.Channels;
-            if (native.FeaturesImage.Data != IntPtr.Zero && fw > 0 && fh > 0)
-            {
-                int step = native.FeaturesImage.Step > 0 ? native.FeaturesImage.Step : fw * fch;
-                int rowBytes = fw * fch;
-                byte[] raw = new byte[step * fh];
-                Marshal.Copy(native.FeaturesImage.Data, raw, 0, raw.Length);
-                if (step == rowBytes)
-                {
-                    pixels = raw;
-                }
-                else
-                {
-                    pixels = new byte[rowBytes * fh];
-                    for (int r = 0; r < fh; r++)
-                        Buffer.BlockCopy(raw, r * step, pixels, r * rowBytes, rowBytes);
-                }
-            }
+            if (fw <= 0 || fh <= 0) { fw = 0; fh = 0; fch = 0; }
 
             return new TrainResult
             {
@@ -342,6 +480,22 @@ namespace ShapeBasedMatching
             return buf;
         }
 
+        /// <summary>把库内部的图像缓冲拷进托管字节数组 (顺手去掉行对齐填充)</summary>
+        private static byte[] CopyImageBytes(RawImage img)
+        {
+            if (img.Data == IntPtr.Zero || img.Width <= 0 || img.Height <= 0) return null;
+            int ch = img.Channels <= 0 ? 1 : img.Channels;
+            int rowBytes = img.Width * ch;
+            int step = img.Step > 0 ? img.Step : rowBytes;
+            byte[] raw = new byte[step * img.Height];
+            Marshal.Copy(img.Data, raw, 0, raw.Length);
+            if (step == rowBytes) return raw;
+            byte[] pixels = new byte[rowBytes * img.Height];
+            for (int r = 0; r < img.Height; r++)
+                Buffer.BlockCopy(raw, r * step, pixels, r * rowBytes, rowBytes);
+            return pixels;
+        }
+
         private void CheckResult(int code, string api)
         {
             if (code < 0)
@@ -452,6 +606,28 @@ namespace ShapeBasedMatching
 
         [DllImport(Dll, CallingConvention = Call)]
         internal static extern int sbm_set_grasp_points(IntPtr h, IntPtr classId, IntPtr xy, int count);
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SbmThresholdEstimate
+        {
+            public double WeakThresh, StrongThresh;
+            [MarshalAs(UnmanagedType.I4)]
+            public int Ok;
+            public int MaskPixels, RequestedFeatures, Candidates, Features;
+            public double MedianGradient, P95Gradient, SelfScore;
+            public IntPtr Note;
+            public RawImage FeaturesImage;
+        }
+
+        [DllImport(Dll, CallingConvention = Call)]
+        internal static extern void sbm_threshold_search_params_init(ref ThresholdSearchParams p);
+
+        [DllImport(Dll, CallingConvention = Call)]
+        internal static extern int sbm_estimate_thresholds(IntPtr h, IntPtr image, int[] roi,
+                                                           ref ThresholdSearchParams p,
+                                                           IntPtr zones, int zoneCount,
+                                                           IntPtr positiveMask, IntPtr negativeMask,
+                                                           IntPtr outEstimate);
 
         [DllImport(Dll, CallingConvention = Call)]
         internal static extern int sbm_match(IntPtr h, IntPtr image, double scoreThreshold,

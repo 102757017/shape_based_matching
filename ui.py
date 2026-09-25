@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QFormLayout, QLabel, QSpinBox, QDoubleSpinBox,
     QPushButton, QStatusBar, QFileDialog, QCheckBox, QScrollArea,
     QLineEdit, QListWidget, QAbstractItemView, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy
+    QHeaderView, QSizePolicy, QDialog, QDialogButtonBox
 )
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer
@@ -429,6 +429,21 @@ class TemplateMatchingApp(QMainWindow):
         create_layout.addRow("结束尺度:", self.create_scale_end); create_layout.addRow("尺度步长:", self.create_scale_step)
         create_layout.addRow("特征点数量:", self.create_feature_num); create_layout.addRow("弱阈值:", self.create_weak_thresh)
         create_layout.addRow("强阈值:", self.create_strong_thresh); create_layout.addRow("金字塔容差 (T):", self.pyramid_levels_input)
+        # 阈值自动探测: 免去逐张图手调弱/强阈值
+        self.create_weak_ratio = QDoubleSpinBox(); self.create_weak_ratio.setRange(0.1, 0.9)
+        self.create_weak_ratio.setValue(0.5); self.create_weak_ratio.setSingleStep(0.05)
+        self.create_weak_ratio.setToolTip("弱阈值 = 该比例 x 强阈值 (弱阈值只参与场景图梯度过滤)")
+        self.btn_estimate_thresh = QPushButton("按当前训练图自动探测阈值")
+        self.btn_estimate_thresh.setToolTip(
+            "按当前训练图 + ROI + 涂抹掩码自动给出弱/强阈值并回填。\n"
+            "原理: 沿 ROI 内梯度幅值的分位数撒候选强阈值, 每个候选真实跑一遍特征提取,\n"
+            "挑“候选点约为期望特征点 3 倍且特征点数够”的那组。")
+        self.btn_estimate_thresh.clicked.connect(self.estimate_thresholds)
+        detect_layout = QHBoxLayout()
+        detect_layout.addWidget(self.btn_estimate_thresh)
+        detect_layout.addWidget(QLabel("弱/强比例:")); detect_layout.addWidget(self.create_weak_ratio)
+        detect_layout.addStretch()
+        create_layout.addRow(detect_layout)
         layout.addWidget(create_group); layout.addStretch(); return tab
 
     def create_match_tab(self):
@@ -848,6 +863,73 @@ class TemplateMatchingApp(QMainWindow):
     def run_process(self):
         if self.tabs.currentWidget() == self.train_tab: self.train_template()
         else: self.match_template()
+
+    def estimate_thresholds(self):
+        """按当前训练图 + ROI + 涂抹掩码自动探测弱/强阈值, 探测成功则回填到输入框。"""
+        if self.train_image is None: self.update_status("请先加载训练图", "fail"); return
+        if self.roi_rect is None or self.roi_rect.isNull():
+            self.update_status("请先绘制主ROI区域", "fail"); return
+        positive_mask = self.positive_mask
+        negative_mask = self.negative_mask if (self.negative_mask is not None and np.any(self.negative_mask)) else None
+        if positive_mask is not None and not np.any(positive_mask):
+            self.update_status("涂抹的识别区域为空 (全部被擦除), 无法探测阈值", "fail"); return
+
+        self.update_status("正在探测阈值 (每个候选都要真实跑一遍特征提取, 稍等)...", "running")
+        self.start_timer()
+        try:
+            r = self.matcher.estimate_thresholds(
+                self.train_image, self.roi_rect.getRect(),
+                feature_num=self.create_feature_num.value(),
+                positive_mask=positive_mask, negative_mask=negative_mask,
+                exclusion_zones=self.exclusion_zones,
+                scale_end=self.create_scale_end.value(),
+                weak_ratio=self.create_weak_ratio.value())
+        except (ValueError, RuntimeError) as e:
+            self.update_status(f"阈值探测失败: {e}", "fail"); return
+        except Exception as e:
+            traceback.print_exc(); self.update_status(f"发生未知错误: {e}", "fail"); return
+        finally:
+            self.stop_timer()
+
+        applied = bool(r.get('ok')) and int(r.get('features') or 0) > 0
+        if applied:
+            self.create_weak_thresh.setValue(round(float(r['weak_thresh']), 1))
+            self.create_strong_thresh.setValue(round(float(r['strong_thresh']), 1))
+            self.update_status(
+                f"探测完成, 已回填阈值: 弱 {r['weak_thresh']:.1f} / 强 {r['strong_thresh']:.1f}", "success")
+        else:
+            self.update_status("未探测到可用的阈值组合, 请检查 ROI / 涂抹掩码", "fail")
+        self._show_thresholds_dialog(r, applied)
+
+    def _show_thresholds_dialog(self, r, applied: bool):
+        """展示探测结果: 诊断文本 + 带特征点红点的 ROI 预览。"""
+        dlg = QDialog(self); dlg.setWindowTitle("阈值自动探测结果")
+        v = QVBoxLayout(dlg)
+        title = "阈值已回填到上方输入框。" if applied else "未找到可用的阈值组合。"
+        text = QLabel(title + "\n" + str(r.get('note') or ""))
+        text.setWordWrap(True)
+        v.addWidget(text)
+
+        img = r.get('features_image')
+        if img is not None and getattr(img, 'size', 0) > 0 and img.ndim == 3:
+            preview = img
+            if preview.shape[2] == 4: preview = cv2.cvtColor(preview, cv2.COLOR_BGRA2BGR)
+            h, w = preview.shape[:2]
+            scale = min(1.0, 520.0 / max(w, 1))
+            if scale < 1.0:
+                preview = cv2.resize(preview, (max(1, int(w * scale)), max(1, int(h * scale))),
+                                     interpolation=cv2.INTER_AREA)
+            qimg = QImage(preview.data, preview.shape[1], preview.shape[0],
+                          preview.shape[2] * preview.shape[1], QImage.Format.Format_BGR888)
+            lbl = QLabel(); lbl.setPixmap(QPixmap.fromImage(qimg))
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            v.addWidget(lbl)
+
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        box.button(QDialogButtonBox.StandardButton.Ok).setText("关闭")
+        box.accepted.connect(dlg.accept)
+        v.addWidget(box)
+        dlg.exec()
 
     def train_template(self):
         if self.train_image is None: self.update_status("请先加载训练图", "fail"); return

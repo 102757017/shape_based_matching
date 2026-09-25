@@ -155,6 +155,44 @@ py::list PyMatcher::get_base_template_features(const std::string& class_id) cons
     return pts_to_list(core_.get_base_template_features(class_id));
 }
 
+// dict -> ThresholdSearchOptions (缺项用默认值)
+sbm::ThresholdSearchOptions thr_options_from_dict(const py::dict& d) {
+    sbm::ThresholdSearchOptions o;
+    if (d.contains("feature_num")) o.feature_num = d["feature_num"].cast<int>();
+    if (d.contains("pyramid_levels")) o.pyramid_levels = d["pyramid_levels"].cast<std::vector<int>>();
+    if (d.contains("scale_end")) o.scale_end = d["scale_end"].cast<float>();
+    if (d.contains("weak_ratio")) o.weak_ratio = d["weak_ratio"].cast<float>();
+    if (d.contains("strong_min")) o.strong_min = d["strong_min"].cast<float>();
+    if (d.contains("strong_max")) o.strong_max = d["strong_max"].cast<float>();
+    if (d.contains("run_self_check")) o.run_self_check = d["run_self_check"].cast<bool>();
+    return o;
+}
+
+py::dict PyMatcher::estimate_thresholds(const cv::Mat& train_image, std::vector<int> roi,
+                                        py::object positive_mask, py::object negative_mask,
+                                        py::object exclusion_zones, py::object options) {
+    sbm::ThresholdSearchOptions opt;
+    if (!options.is_none()) opt = thr_options_from_dict(options.cast<py::dict>());
+
+    sbm::ThresholdEstimate r = sbm::estimate_train_thresholds(
+        train_image, roi, mat_from_object(positive_mask), mat_from_object(negative_mask),
+        zones_from_list(exclusion_zones), opt);
+
+    py::dict out;
+    out["weak_thresh"] = r.weak_thresh;
+    out["strong_thresh"] = r.strong_thresh;
+    out["ok"] = r.ok;
+    out["candidates"] = r.candidates;
+    out["features"] = r.features;
+    out["requested_features"] = r.requested_features;
+    out["median_gradient"] = r.median_gradient;
+    out["p95_gradient"] = r.p95_gradient;
+    out["self_score"] = r.self_score;
+    out["note"] = r.note;
+    out["features_image"] = py::cast(r.features_image);
+    return out;
+}
+
 py::list PyMatcher::match(const cv::Mat& image, double score_threshold,
                           py::object class_ids_to_match,
                           bool use_nms, double nms_threshold,

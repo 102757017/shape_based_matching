@@ -10,6 +10,9 @@
   1. pyd 模块搜索路径处理;
   2. repair_mojibake / safe_file_name (依赖 OS 编码转换, 且 ui.py 直接 import 它们);
   3. Matcher 薄壳: 透传给 C++ 的 PyMatcher, 对外签名与旧版完全一致。
+
+新增 (阈值自动探测): PyMatcher::estimate_thresholds -> Matcher.estimate_thresholds,
+详见 core/matcher_core.h 的 estimate_train_thresholds 注释。
 """
 import logging
 import re
@@ -127,6 +130,36 @@ class Matcher:
     def get_base_template_features(self, class_id):
         """某类别训练时主模板的特征点 (ROI 坐标)。"""
         return list(self._impl.get_base_template_features(class_id))
+
+    def estimate_thresholds(self, train_image, roi_rect_tuple, feature_num=None,
+                            positive_mask=None, negative_mask=None, exclusion_zones=None,
+                            scale_end=None, weak_ratio=0.5, run_self_check=True):
+        """自动探测这张训练图(ROI 区域)合适的弱/强阈值, 免得逐张图手调。
+
+        原理: 拿训练图自身的梯度分布做搜索 —— 沿"梯度幅值的分位数"撒候选强阈值,
+        每个候选都真实跑一遍特征提取, 挑"候选点富余度约 3 倍且特征点数够"的那组。
+        弱阈值默认取强阈值的一半(弱阈值是给场景图用的, 见下面 weak_ratio)。
+
+        :param train_image: 训练图 (灰度或 BGR ndarray)
+        :param roi_rect_tuple: ROI (x, y, w, h)
+        :param feature_num: 期望特征点数, None = 沿用界面上的"特征点数量"
+        :param positive_mask / negative_mask: ROI 尺寸的 uint8 涂抹掩码 (语义同 train)
+        :param exclusion_zones: 排除区域 (语义同 train)
+        :param scale_end: 训练时的最大尺度, 只影响内部 padding 计算 (默认 1.0)
+        :param weak_ratio: 弱阈值 = weak_ratio * 强阈值
+        :param run_self_check: 是否跑一次"训练图自匹配"冒烟测试
+        :return dict: weak_thresh / strong_thresh / ok / candidates / features /
+                      requested_features / median_gradient / p95_gradient /
+                      self_score / note / features_image (带红点的 ROI 预览)
+        """
+        options = {}
+        if feature_num is not None: options['feature_num'] = int(feature_num)
+        if scale_end is not None: options['scale_end'] = float(scale_end)
+        options['weak_ratio'] = float(weak_ratio)
+        options['run_self_check'] = bool(run_self_check)
+        return self._impl.estimate_thresholds(
+            train_image, list(roi_rect_tuple), positive_mask, negative_mask,
+            list(exclusion_zones) if exclusion_zones else None, options)
 
     def match(self, image, score_threshold, class_ids_to_match=None,
               use_nms=True, nms_threshold=0.5, grasp_points_config=None,

@@ -165,5 +165,12 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
             py::arg("grasp_points_config") = py::none(),
             py::arg("max_matches") = 0, py::arg("min_fitness") = 0.0,
             py::arg("use_refine") = true, py::arg("max_overlap") = 1.0,
-            py::arg("masks") = py::none(), py::arg("fill_overlap") = true);
+            py::arg("masks") = py::none(), py::arg("fill_overlap") = true)
+        // 阈值自动探测: 输入训练图 + ROI, 输出建议的弱/强阈值
+        .def("estimate_thresholds", &PyMatcher::estimate_thresholds,
+            py::arg("train_image"), py::arg("roi"),
+            py::arg("positive_mask") = py::none(),
+            py::arg("negative_mask") = py::none(),
+            py::arg("exclusion_zones") = py::none(),
+            py::arg("options") = py::none());
 }
