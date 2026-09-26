@@ -169,6 +169,13 @@ namespace ShapeBasedMatching
         public double Fitness;
         public double Overlap;
         public double[] GraspPoints;        // 抓取点: x,y,... (第 1 个即主抓取点)
+        /// <summary>命中模板训练时的旋转角 (度)。与 RefinedAngle 不同: 这是模板自身角度,
+        /// RefinedAngle 才是最终姿态 (Angle - ICP 增量角)。</summary>
+        public double Angle;
+        /// <summary>命中模板训练时的缩放系数 (info.json 的 templates[TemplateId].scale)</summary>
+        public double Scale;
+        /// <summary>ICP 精修引入的额外缩放; 目标最终相对原图的大小 = Scale * RefinedScale</summary>
+        public double RefinedScale;
     }
 
     /// <summary>matcher 句柄封装。非线程安全, 一个实例只在一个线程里用。</summary>
@@ -455,6 +462,9 @@ namespace ShapeBasedMatching
                     m.Fitness = raw.Fitness;
                     m.Overlap = raw.Overlap;
                     m.GraspPoints = CopyDoubles(raw.GraspPoints, raw.GraspCount * 2);
+                    m.Angle = raw.Angle;
+                    m.Scale = raw.Scale;
+                    m.RefinedScale = raw.RefinedScale;
                     list.Add(m);
                 }
                 return list;
@@ -566,6 +576,10 @@ namespace ShapeBasedMatching
             public double RefinedX, RefinedY, RefinedAngle, Fitness, Overlap;
             public int GraspCount;
             public IntPtr GraspPoints;
+            // 与 Native.SbmMatchResult 对应, 必须追加在末尾以保持前面字段偏移不变
+            public double Angle;               // 命中模板训练时的旋转角 (度)
+            public double Scale;               // 命中模板训练时的缩放系数
+            public double RefinedScale;        // ICP 精修引入的额外缩放; 最终大小 = Scale * RefinedScale
         }
 
         [DllImport(Dll, CallingConvention = Call)]

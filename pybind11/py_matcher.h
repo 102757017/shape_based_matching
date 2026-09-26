@@ -64,6 +64,10 @@ public:
                                  py::object exclusion_zones, py::object options);
 
     /// 执行模板匹配 (对应旧 Matcher.match), 返回 dict 列表
+    /// 每个 dict 的字段: class_id / template_id / score / x / y / icp_refined /
+    /// refined_box_points / matched_features / refined_x / refined_y / refined_angle /
+    /// angle(模板训练角) / scale(模板训练缩放) / refined_scale(ICP 额外缩放) /
+    /// fitness / overlap / grasp_points / grasp_point
     py::list match(const cv::Mat& image, double score_threshold,
                    py::object class_ids_to_match,
                    bool use_nms, double nms_threshold,

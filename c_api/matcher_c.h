@@ -119,6 +119,15 @@ typedef struct sbm_match_result_t {
     double overlap;
     int grasp_count;
     const double* grasp_points;  /* 抓取点: x,y,... 共 2*grasp_count */
+    /* --- 以下三项为后加字段, 追加在结构体末尾, 前面所有字段的偏移都不变 --- */
+    double angle;                /* 命中的模板训练时的旋转角 (度)。
+                                  * 注意与 refined_angle 不是一回事:
+                                  *   angle        模板自身训练就用的角度 (来自 info.json)
+                                  *   refined_angle 最终姿态 = angle - ICP 增量角 */
+    double scale;                /* 命中的模板训练时的缩放系数 (来自 info.json 的
+                                  * templates[template_id].scale), 缺省 1.0 */
+    double refined_scale;        /* ICP 精修引入的额外缩放, 与 refined_angle 同口径;
+                                  * 目标最终相对原图的大小 = scale * refined_scale, 缺省 1.0 */
 } sbm_match_result_t;
 
 /* ============================ 句柄 ============================ */

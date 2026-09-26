@@ -423,6 +423,9 @@ int sbm_match_result(void* handle, int index, sbm_match_result_t* out) {
     out->overlap = r.overlap;
     out->grasp_count = static_cast<int>(h->grasp_bufs[index].size() / 2);
     out->grasp_points = h->grasp_bufs[index].empty() ? nullptr : h->grasp_bufs[index].data();
+    out->angle = r.angle;
+    out->scale = r.scale;
+    out->refined_scale = r.refined_scale;
     return 0;
 }
 

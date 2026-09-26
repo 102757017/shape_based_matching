@@ -122,6 +122,12 @@ struct MatchResult {
     std::vector<std::pair<double, double>> refined_box_points;   // 4 个角点
     std::vector<std::pair<double, double>> matched_features;     // 精修后的特征点
     double refined_x = 0.0, refined_y = 0.0, refined_angle = 0.0;
+    // ---- 命中模板自身的姿态参数 (旧版 Matcher 顺手丢掉过, 这里补上) ----
+    double angle = 0.0;          // 命中的那个模板训练时的旋转角 (度)
+    double scale = 1.0;          // 命中的那个模板训练时的缩放系数 (info.json 的 templates[tid].scale)
+    // ICP 精修引入的额外缩放: 模板坐标里已含 scale, 精修变换的线性部分还会再乘一层,
+    // 所以"最终相对原图的大小" = scale * refined_scale。口径与 refined_angle 一致。
+    double refined_scale = 1.0;
     double fitness = -1.0;
     double overlap = 0.0;
     // 抓取点, 至少 1 个; 第 1 个即旧版 dict 里的 grasp_point

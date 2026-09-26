@@ -600,6 +600,11 @@ std::vector<MatchResult> MatcherCore::match(
                 const cv::Matx33d& A = have_transform ? T : M;
                 return std::atan2(A(1, 0), A(0, 0)) * 180.0 / CV_PI;
             }();
+            // 精修变换的线性部分模长 = ICP 带来的额外缩放 (sim3, 只有旋转+均匀缩放)
+            double refine_scale_delta = [&]() {
+                const cv::Matx33d& A = have_transform ? T : M;
+                return std::sqrt(A(0, 0) * A(0, 0) + A(1, 0) * A(1, 0));
+            }();
 
             // ROI 点 -> 模板坐标系
             auto roi_to_templ = [&](cv::Point2d p) -> cv::Point2d {
@@ -618,6 +623,9 @@ std::vector<MatchResult> MatcherCore::match(
             res.x = static_cast<double>(m.x);
             res.y = static_cast<double>(m.y);
             res.icp_refined = use_refine;
+            res.angle = angle_deg;      // 模板自身的训练角
+            res.scale = scale;          // 模板自身的训练缩放
+            res.refined_scale = refine_scale_delta;
 
             const std::vector<cv::Point2d> roi_corners = {
                 {0, 0}, {static_cast<double>(roi_w), 0},
@@ -638,6 +646,7 @@ std::vector<MatchResult> MatcherCore::match(
             res.refined_x = center.x;
             res.refined_y = center.y;
             res.refined_angle = angle_deg - delta_angle;   // 最终角度 = 训练角度 - ICP 增量角
+            // 最终缩放 = 模板训练缩放 * ICP 增量缩放
             res.fitness = static_cast<double>(m.fitness);
             res.overlap = static_cast<double>(m.overlap);
 

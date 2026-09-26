@@ -247,6 +247,10 @@ py::list PyMatcher::match(const cv::Mat& image, double score_threshold,
         res["refined_x"] = r.refined_x;
         res["refined_y"] = r.refined_y;
         res["refined_angle"] = r.refined_angle;
+        // 命中模板自身的姿态; refined_scale = ICP 带来的额外缩放 (最终大小 = scale * refined_scale)
+        res["angle"] = r.angle;
+        res["scale"] = r.scale;
+        res["refined_scale"] = r.refined_scale;
         res["fitness"] = r.fitness;
         res["overlap"] = r.overlap;
         res["grasp_points"] = pts_to_list(r.grasp_points);
