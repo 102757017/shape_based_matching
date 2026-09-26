@@ -478,9 +478,11 @@ std::vector<MatchResult> MatcherCore::match(
     if (!detector_ready_ || class_order_.empty())
         throw std::runtime_error("没有加载任何模板类别，请先加载或训练模板。");
 
-    // 1. 图像预处理: 中值滤波 + 补边到 16 的倍数 (MIPP 步长要求)
-    cv::Mat image_to_match;
-    cv::medianBlur(image, image_to_match, 3);
+    // 1. 图像预处理: 只补边到 16 的倍数 (MIPP 步长要求), 不做任何滤波。
+    //    模板特征是在"未滤波"的训练图 ROI 上提取的, 场景若先滤波 (旧版这里做过 medianBlur(3)),
+    //    就会破坏/改变 1~3px 尺度的边缘方向, 这部分特征点永久对不上 —— 连训练图自匹配都拿不到 100 分。
+    //    两侧口径必须完全一致: 要么都不滤, 要么训练时也滤同样的核。
+    cv::Mat image_to_match = image;
     int orig_h = image_to_match.rows, orig_w = image_to_match.cols;
     const int stride = 16;
     bool need_pad = (orig_h % stride != 0 || orig_w % stride != 0);

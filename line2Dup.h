@@ -3,7 +3,11 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
+#include <algorithm>
+#include <cassert>
+#include <cmath>
 #include <map>
+#include <vector>
 
 #include "mipp.h"  // for SIMD in different platforms
 
@@ -466,6 +470,39 @@ namespace shape_based_matching {
             return infos;
         }
 
+        /// 沿 [lo, hi] 以 step 铺格点, 并强制补上两类"必须存在但单方向步进会漏掉"的值:
+        ///   - 上端点 hi: 步长不整除区间长度时, `v <= hi + eps` 会把 hi 悄悄丢掉;
+        ///   - 恒等档: 尺度 1.0 / 角度 0(以及区间内其它 360 的整数倍), 只要它落在区间内。
+        ///
+        /// 为什么恒等档是硬要求: 起点与步长一配合就会跳过它 ——
+        ///   0.90~1.10 / step 0.15 -> {0.90, 1.05}      (没有 1.0, 差 5%)
+        ///   -45~45   / step 2    -> {-45,-43,...,45}  (没有 0, 最近的是 ±1)
+        /// 模板与目标差一点角度/尺度, 特征点就沿径向外漂: 漂移量 ≈ 半径 × 偏差。
+        /// ROI 一大就致命 —— 1375px 宽的 ROI 差 1 度, 两端特征点漂 ≈12px, 远超金字塔
+        /// 容差 T(4,8), 响应直接塌陷: 训练图自匹配都只剩 81 分(实测), 尺度差 5% 更狠。
+        std::vector<float> spread_axis(float lo, float hi, float step, bool is_scale)
+        {
+            std::vector<float> vals;
+            for (float v = lo; v <= hi + eps; v += step) vals.push_back(v);
+            if (vals.empty()) vals.push_back(lo);
+
+            auto push_if_new = [&vals](float v) {
+                for (float e : vals) if (std::fabs(e - v) < 1e-4f) return;
+                vals.push_back(v);
+            };
+
+            push_if_new(hi);                       // 上端点
+            if (is_scale) {                        // 尺度恒等档 = 1.0
+                if (lo - 1e-4f <= 1.f && 1.f <= hi + 1e-4f) push_if_new(1.f);
+            } else {                               // 角度恒等档 = 0 (mod 360)
+                int k0 = static_cast<int>(std::ceil((lo - 1e-4f) / 360.f));
+                int k1 = static_cast<int>(std::floor((hi + 1e-4f) / 360.f));
+                for (int k = k0; k <= k1; ++k) push_if_new(360.f * static_cast<float>(k));
+            }
+            std::sort(vals.begin(), vals.end());
+            return vals;
+        }
+
         void produce_infos() {
             infos.clear();
 
@@ -482,33 +519,25 @@ namespace shape_based_matching {
                 scale_range.push_back(1);
             }
 
-            if (angle_range.size() == 1 && scale_range.size() == 1) {
-                float angle = angle_range[0];
-                float scale = scale_range[0];
-                infos.emplace_back(angle, scale);
+            // 单元素 = "只有这一档", 原样使用(不铺格点); 双元素 = 区间, 铺格点并补恒等档/端点
+            std::vector<float> angles, scales;
+            if (angle_range.size() == 1) {
+                angles = {angle_range[0]};
+            } else {
+                assert(angle_range[1] > angle_range[0]);
+                angles = spread_axis(angle_range[0], angle_range[1], angle_step, false);
+            }
+            if (scale_range.size() == 1) {
+                scales = {scale_range[0]};
+            } else {
+                assert(scale_range[1] > scale_range[0]);
+                scales = spread_axis(scale_range[0], scale_range[1], scale_step, true);
+            }
 
-            }
-            else if (angle_range.size() == 1 && scale_range.size() == 2) {
-                assert(scale_range[1] > scale_range[0]);
-                float angle = angle_range[0];
-                for (float scale = scale_range[0]; scale <= scale_range[1] + eps; scale += scale_step) {
+            // 尺度外层 / 角度内层, 与旧实现的枚举顺序保持一致
+            for (float scale : scales) {
+                for (float angle : angles) {
                     infos.emplace_back(angle, scale);
-                }
-            }
-            else if (angle_range.size() == 2 && scale_range.size() == 1) {
-                assert(angle_range[1] > angle_range[0]);
-                float scale = scale_range[0];
-                for (float angle = angle_range[0]; angle <= angle_range[1] + eps; angle += angle_step) {
-                    infos.emplace_back(angle, scale);
-                }
-            }
-            else if (angle_range.size() == 2 && scale_range.size() == 2) {
-                assert(scale_range[1] > scale_range[0]);
-                assert(angle_range[1] > angle_range[0]);
-                for (float scale = scale_range[0]; scale <= scale_range[1] + eps; scale += scale_step) {
-                    for (float angle = angle_range[0]; angle <= angle_range[1] + eps; angle += angle_step) {
-                        infos.emplace_back(angle, scale);
-                    }
                 }
             }
         }
