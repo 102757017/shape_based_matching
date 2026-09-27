@@ -36,6 +36,10 @@
 	inline reg blend<int8_t>(const reg v1, const reg v2, const msk m) {
 		return _mm512_castsi512_ps(_mm512_mask_blend_epi8((__mmask64)m, _mm512_castps_si512(v2), _mm512_castps_si512(v1)));
 	}
+	template <>
+	inline reg blend<uint8_t>(const reg v1, const reg v2, const msk m) {
+		return blend<int8_t>(v1, v2, m);
+	}
 #endif
 
 
@@ -296,6 +300,11 @@
 	template <>
 	inline msk cmpeq<int8_t>(const reg v1, const reg v2) {
 		return (msk) _mm512_cmpeq_epi8_mask(_mm512_castps_si512(v1), _mm512_castps_si512(v2));
+	}
+
+	template <>
+	inline msk cmpeq<uint8_t>(const reg v1, const reg v2) {
+		return cmpeq<int8_t>(v1, v2);
 	}
 #endif
 
@@ -1829,6 +1838,11 @@
 	template <>
 	inline reg andb<int8_t>(const reg v1, const reg v2) {
 		return _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(v1), _mm512_castps_si512(v2)));
+	}
+
+	template <>
+	inline reg andb<uint8_t>(const reg v1, const reg v2) {
+		return andb<int8_t>(v1, v2);
 	}
 
 	// ---------------------------------------------------------------------------------------------------- andb (mask)

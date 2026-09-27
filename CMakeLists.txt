@@ -380,3 +380,13 @@ if (USE_PYBIND)
     # 构建后把 OpenCV DLL 复制到模块旁边，保证 import 时能加载
     sbm_copy_opencv_runtime(${PROJECT_NAME}_py)
 endif()
+
+# fusion 流水线(SIMD 融合)对比测试 exe, 来自 fusion_fix_memo 分支
+add_executable(${PROJECT_NAME}_test_fusion line2Dup.cpp test_fusion.cpp)
+# 把测试数据目录的绝对路径写进程序，运行时不再依赖工作目录
+target_compile_definitions(${PROJECT_NAME}_test_fusion PRIVATE
+    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/")
+target_link_libraries(${PROJECT_NAME}_test_fusion ${OpenCV_LIBS})
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(${PROJECT_NAME}_test_fusion OpenMP::OpenMP_CXX)
+endif()

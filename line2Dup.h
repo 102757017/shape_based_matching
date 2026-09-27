@@ -8,8 +8,69 @@
 #include <cmath>
 #include <map>
 #include <vector>
-
+#include <functional>
 #include "mipp.h"  // for SIMD in different platforms
+
+#include <chrono>
+class Timer
+{
+public:
+    Timer() : beg_(clock_::now()) {}
+    void reset() { beg_ = clock_::now(); }
+    double elapsed() const
+    {
+        return std::chrono::duration_cast<second_>(clock_::now() - beg_).count();
+    }
+    double out(std::string message = "")
+    {
+        double t = elapsed();
+        std::cout << message << "\nelasped time:" << t << "s\n"
+                  << std::endl;
+        reset();
+        return t;
+    }
+    void record(std::string message = "")
+    {
+        if (str_time_map.find(message) == str_time_map.end())
+        {
+            str_time_map[message] = elapsed();
+        }
+        else
+        {
+            str_time_map[message] += elapsed();
+        }
+        reset();
+    }
+    void display(std::string message = "")
+    {
+        if (message == "")
+        {
+            for (auto item : str_time_map)
+            {
+                std::cout << item.first << "\nelasped time:" << item.second << "s\n"
+                          << std::endl;
+            }
+        }
+        else
+        {
+            std::cout << message << "\nelasped time:" << str_time_map[message] << "s\n"
+                      << std::endl;
+        }
+    }
+
+private:
+    typedef std::chrono::high_resolution_clock clock_;
+    typedef std::chrono::duration<double, std::ratio<1>> second_;
+    std::chrono::time_point<clock_> beg_;
+
+    std::map<std::string, double> str_time_map;
+};
+
+class ScopeTimer: public Timer{
+    ScopeTimer(std::string out_str_): out_str(out_str_){}
+    ~ScopeTimer(){out(out_str);}
+    std::string out_str;
+};
 
 namespace line2Dup
 {
@@ -128,6 +189,59 @@ namespace line2Dup
         cv::Ptr<ColorGradientPyramid> process(const cv::Mat src, const cv::Mat& mask = cv::Mat()) const
         {
             return cv::makePtr<ColorGradientPyramid>(src, mask, weak_threshold, num_features, strong_threshold);
+        }
+    };
+
+    // fusion 流水线的节点基础设施(来自 fusion_fix_memo 分支):
+    // 描述一个 SIMD 融合算子的滚动缓冲区与父子连接关系
+    struct FilterNode
+    {
+        std::vector<cv::Mat> buffers;
+
+        int num_buf = 1;
+        int buffer_rows = 0;
+        int buffer_cols = 0;
+        int padded_rows = 0;
+        int padded_cols = 0;
+
+        int anchor_row = 0;  // anchor: where topleft is in full img
+        int anchor_col = 0;
+
+        int prepared_row = 0; // where have been calculated in full img
+        int prepared_col = 0;
+        int parent = -1;
+
+        std::string op_name;
+        int op_type = CV_16U;
+        int op_r, op_c;
+
+        int simd_step = mipp::N<int16_t>();
+        bool use_simd = true;
+
+        template <class T>
+        T *ptr(int r, int c, int buf_idx = 0)
+        {
+            r -= anchor_row;  // from full img to buffer img
+            c -= anchor_col;
+            return &buffers[buf_idx].at<T>(r, c);
+        }
+
+        std::function<int(int, int, int, int)> simple_update;  // update start_r end_r start_c end_c
+        std::function<int(int, int, int, int)> simd_update;
+
+        void backward_rc(std::vector<FilterNode>& nodes, int rows, int cols, int cur_padded_rows, int cur_padded_cols) // calculate paddings
+        {
+            if (rows > buffer_rows){
+                buffer_rows = rows;
+                padded_rows = cur_padded_rows;
+            }
+            if (cols > buffer_cols){
+                buffer_cols = cols;
+                padded_cols = cur_padded_cols;
+            }
+            if (parent >= 0)
+                nodes[parent].backward_rc(nodes, buffer_rows+op_r - 1, cols+op_c - 1,
+                                          cur_padded_rows+op_r/2, cur_padded_cols+op_c/2);
         }
     };
 
@@ -342,6 +456,14 @@ namespace line2Dup
         void readClasses(const std::vector<std::string>& class_ids,
             const std::string& format = "templates_%s.yml.gz");
         void writeClasses(const std::string& format = "templates_%s.yml.gz") const;
+
+        // ---- fusion 流水线相关(来自 fusion_fix_memo 分支) ----
+        // true 时 match() 会在第 0 层额外输出 sobel 的 dx_/dy_(供 ICP 精修使用)
+        bool set_produce_dxy = false;
+        // fusion ProcessManager 的滚动缓冲区, 跨 match() 调用复用避免重复分配
+        std::vector<std::vector<char>> fusion_buffers;
+        // 响应图构建的梯度幅值阈值(来自构造时的 strong_thresh)
+        float res_map_mag_thresh = 60.0f;
 
         // 添加 clear_classes 方法(同时清掉训练 mask 缓存)
         void clear_classes() { class_templates.clear(); class_masks.clear(); }

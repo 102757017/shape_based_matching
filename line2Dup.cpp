@@ -1,7 +1,8 @@
 #include "line2Dup.h"
 #include "cuda_icp/icp.h"
-#include "cuda_icp/geometry.h" 
+#include "cuda_icp/geometry.h"
 #include <iostream>
+#include "fusion.h"
 
 using namespace std;
 using namespace cv;
@@ -196,9 +197,9 @@ bool ColorGradientPyramid::selectScatteredFeatures(const std::vector<Candidate> 
             i = 0;
             distance -= 1.0f;
             distance_sq = distance * distance;
-             if (num_ok || distance < 3){
-                 break;
-             }
+            if (num_ok || distance < 3){
+                break;
+            }
         }
     }
     return true;
@@ -443,7 +444,7 @@ bool ColorGradientPyramid::extractTemplate(Template &templ) const
     if (!mask.empty())
     {
         erode(mask, local_mask, Mat(), Point(-1, -1), 1, BORDER_REPLICATE);
-//        subtract(mask, local_mask, local_mask);
+        //        subtract(mask, local_mask, local_mask);
     }
 
     std::vector<Candidate> candidates;
@@ -1058,55 +1059,116 @@ Detector::Detector(int num_features, std::vector<int> T, float weak_thresh, floa
     this->modality = makePtr<ColorGradient>(weak_thresh, num_features, strong_threash);
     pyramid_levels = static_cast<int>(T.size());
     T_at_level = T;
+    res_map_mag_thresh = strong_threash;
 }
 
-std::vector<Match> Detector::match(Mat source, float threshold,
-                                   const std::vector<std::string> &class_ids, const Mat mask)
+static int gcd(int a, int b){
+    if (a == 0)
+        return b;
+    return gcd(b % a, a);
+}
+static int lcm(int a, int b){
+    return (a*b)/gcd(a, b);
+}
+static int least_mul_of_Ts(const std::vector<int>& T_at_level){
+    assert(T_at_level.size() > 0);
+    int cur_res = T_at_level[0];
+    for(int i=1; i<T_at_level.size(); i++){
+        int cur_v = T_at_level[i] << i;
+        cur_res = lcm(cur_v, cur_res);
+    }
+    return cur_res;
+}
+
+std::vector<Match> Detector::match(Mat source, float threshold, const std::vector<string> &class_ids, const Mat mask)
 {
+    dx_ = cv::Mat();
+    dy_ = cv::Mat();
+
 #ifdef DEBUG_MATCH_TIME
     Timer timer;
 #endif
     std::vector<Match> matches;
 
-    // Initialize each ColorGradient with our sources
-    std::vector<Ptr<ColorGradientPyramid>> quantizers;
-    CV_Assert(mask.empty() || mask.size() == source.size());
-    quantizers.push_back(modality->process(source, mask));
+    // --------- fusion version of response map creation
 
-    dx_ = quantizers[0]->dx_;
-    dy_ = quantizers[0]->dy_;
-
-    // pyramid level -> ColorGradient -> quantization
-    LinearMemoryPyramid lm_pyramid(pyramid_levels,
-                                   std::vector<LinearMemories>(1, LinearMemories(8)));
-
-    // For each pyramid level, precompute linear memories for each ColorGradient
+    // results we want
+    LinearMemoryPyramid lm_pyramid(pyramid_levels, std::vector<LinearMemories>(1, LinearMemories(8)));
     std::vector<Size> sizes;
-    for (int l = 0; l < pyramid_levels; ++l)
-    {
-        int T = T_at_level[l];
-        std::vector<LinearMemories> &lm_level = lm_pyramid[l];
 
-        if (l > 0)
-        {
-            for (int i = 0; i < (int)quantizers.size(); ++i)
-                quantizers[i]->pyrDown();
+    assert(mask.empty() && "mask not support yet");
+
+    // no need to crop now, we deal with it internally
+    const int lcm_Ts = least_mul_of_Ts(T_at_level);
+    const int biggest_imgRows = source.rows/lcm_Ts*lcm_Ts;
+    const int biggest_imgCols = source.cols/lcm_Ts*lcm_Ts;
+
+    const int tileRows = 32;
+    const int tileCols = 256;
+    const int num_threads_ = 4;
+
+    const int32_t mag_thresh_l2 = int32_t(res_map_mag_thresh*res_map_mag_thresh);
+
+    cv::Mat pyrdown_src;
+    for(int cur_l = 0; cur_l<T_at_level.size(); cur_l++){
+#ifdef DEBUG_MATCH_TIME
+        timer.reset();
+#endif
+        const bool need_pyr = cur_l < T_at_level.size() - 1;
+
+        const int imgRows = biggest_imgRows >> cur_l;
+        const int imgCols = biggest_imgCols >> cur_l;
+
+        const int cur_T = T_at_level[cur_l];
+        assert(cur_T % 2 == 0);
+
+        // use old linear function will create those for us
+        for(int ori=0; ori<8; ori++){
+            lm_pyramid[cur_l][0][ori] = cv::Mat(cur_T*cur_T, imgCols/cur_T*imgRows/cur_T, CV_8U);
         }
 
-        Mat quantized, spread_quantized;
-        std::vector<Mat> response_maps;
-        for (int i = 0; i < (int)quantizers.size(); ++i)
-        {
-            quantizers[i]->quantize(quantized);
-            spread(quantized, spread_quantized, T);
-            computeResponseMaps(spread_quantized, response_maps);
+        sizes.push_back({imgCols, imgRows});
 
-            LinearMemories &memories = lm_level[i];
-            for (int j = 0; j < 8; ++j)
-                linearize(response_maps[j], memories[j], T);
+        cv::Mat src;
+        if(cur_l == 0) src = source;
+        else src = pyrdown_src;
+
+        if(need_pyr) pyrdown_src = cv::Mat(imgRows/2, imgCols/2, CV_8U);
+
+        simple_fusion::ProcessManager manager(fusion_buffers, tileRows, tileCols);
+        manager.set_num_threads(num_threads_);
+        if(src.channels() == 3)
+            manager.get_nodes().push_back(std::make_shared<simple_fusion::BGR2GRAY_8UC3_8U>());
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::Gauss1x5Node_8U_32S_4bit_larger>());
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::Gauss5x1withPyrdownNode_32S_16S_4bit_smaller>(
+                                          pyrdown_src, need_pyr));
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::Sobel1x3SxxSyxNode_16S_16S>());
+
+        if(set_produce_dxy && cur_l == 0){
+            dx_ = cv::Mat(src.size(), CV_16S, cv::Scalar(0));
+            dy_ = cv::Mat(src.size(), CV_16S, cv::Scalar(0));
+            manager.get_nodes().push_back(std::make_shared<simple_fusion::Sobel3x1SxySyyNodeWithDxy_16S_16S>(dx_, dy_));
+        }else{
+            manager.get_nodes().push_back(std::make_shared<simple_fusion::Sobel3x1SxySyyNode_16S_16S>());
         }
 
-        sizes.push_back(quantized.size());
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::MagPhaseQuant1x1Node_16S_8U>(mag_thresh_l2));
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::Hist3x3Node_8U_8U>());
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::Spread1xnNode_8U_8U>(cur_T + 1));
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::Spreadnx1Node_8U_8U>(cur_T + 1));
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::Response1x1Node_8U_8U>());
+        manager.get_nodes().push_back(std::make_shared<simple_fusion::LinearizeTxTNode_8U_8U>(cur_T, imgCols,
+                                                                                              lm_pyramid[cur_l][0]));
+        manager.arrange(imgRows, imgCols);
+
+        std::vector<cv::Mat> in_v;
+        in_v.push_back(src);
+
+        std::vector<cv::Mat> out_v = lm_pyramid[cur_l][0];
+        manager.process(in_v, out_v);
+#ifdef DEBUG_MATCH_TIME
+        timer.out("fusion time");
+#endif
     }
 #ifdef DEBUG_MATCH_TIME
     timer.out("construct response map");
@@ -1118,11 +1180,9 @@ std::vector<Match> Detector::match(Mat source, float threshold,
         for (; it != itend; ++it)
             matchClass(lm_pyramid, sizes, threshold, matches, it->first, it->second);
     }
-    else
-    {
+    else{
         // Match only templates for the requested class IDs
-        for (int i = 0; i < (int)class_ids.size(); ++i)
-        {
+        for (int i = 0; i < (int)class_ids.size(); ++i){
             TemplatesMap::const_iterator it = class_templates.find(class_ids[i]);
             if (it != class_templates.end())
                 matchClass(lm_pyramid, sizes, threshold, matches, it->first, it->second);
@@ -1134,7 +1194,7 @@ std::vector<Match> Detector::match(Mat source, float threshold,
     std::vector<Match>::iterator new_end = std::unique(matches.begin(), matches.end());
     matches.erase(new_end, matches.end());
 #ifdef DEBUG_MATCH_TIME
-    timer.out("templ match");
+    timer.out("match time");
 #endif
     return matches;
 }
@@ -1301,160 +1361,143 @@ struct MatchPredicate
     float threshold;
 };
 
-void Detector::matchClass(const LinearMemoryPyramid& lm_pyramid,
-    const std::vector<Size>& sizes,
-    float threshold, std::vector<Match>& matches,
-    const std::string& class_id,
-    const std::vector<TemplatePyramid>& template_pyramids) const
+void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
+                          const std::vector<Size> &sizes,
+                          float threshold, std::vector<Match> &matches,
+                          const std::string &class_id,
+                          const std::vector<TemplatePyramid> &template_pyramids) const
 {
-#ifdef _OPENMP
-#pragma omp parallel
-    {
-#endif
-        std::vector<Match> match_private;
-#ifdef _OPENMP
-#pragma omp for nowait
-#endif
-        for (int template_id = 0; template_id < (int)template_pyramids.size(); ++template_id)
-        {
-            const TemplatePyramid& tp = template_pyramids[template_id];
-            // First match over the whole image at the lowest pyramid level
-            /// @todo Factor this out into separate function
-            const std::vector<LinearMemories>& lowest_lm = lm_pyramid.back();
+#pragma omp declare reduction \
+    (omp_insert: std::vector<Match>: omp_out.insert(omp_out.end(), omp_in.begin(), omp_in.end()))
 
-            std::vector<Match> candidates;
+#pragma omp parallel for reduction(omp_insert:matches)
+    for (size_t template_id = 0; template_id < template_pyramids.size(); ++template_id)
+    {
+        const TemplatePyramid &tp = template_pyramids[template_id];
+        // First match over the whole image at the lowest pyramid level
+        /// @todo Factor this out into separate function
+        const std::vector<LinearMemories> &lowest_lm = lm_pyramid.back();
+
+        std::vector<Match> candidates;
+        {
+            // Compute similarity maps for each ColorGradient at lowest pyramid level
+            Mat similarities;
+            int lowest_start = static_cast<int>(tp.size() - 1);
+            int lowest_T = T_at_level.back();
+            int num_features = 0;
+
             {
-                // Compute similarity maps for each ColorGradient at lowest pyramid level
-                Mat similarities;
-                int lowest_start = static_cast<int>(tp.size() - 1);
-                int lowest_T = T_at_level.back();
-                int num_features = 0;
+                const Template &templ = tp[lowest_start];
+                num_features += static_cast<int>(templ.features.size());
+
+                if (templ.features.size() < 64){
+                    similarity_64(lowest_lm[0], templ, similarities, sizes.back(), lowest_T);
+                    similarities.convertTo(similarities, CV_16U);
+                }else if (templ.features.size() < 8192){
+                    similarity(lowest_lm[0], templ, similarities, sizes.back(), lowest_T);
+                }else{
+                    CV_Error(Error::StsBadArg, "feature size too large");
+                }
+            }
+
+            // Find initial matches
+            for (int r = 0; r < similarities.rows; ++r)
+            {
+                ushort *row = similarities.ptr<ushort>(r);
+                for (int c = 0; c < similarities.cols; ++c)
+                {
+                    int raw_score = row[c];
+                    float score = (raw_score * 100.f) / (4 * num_features);
+
+                    if (score > threshold)
+                    {
+                        int offset = /*lowest_T / 2 + */(lowest_T % 2 - 1); // spread has no offset now
+                        int x = c * lowest_T + offset;
+                        int y = r * lowest_T + offset;
+                        candidates.push_back(Match(x, y, score, class_id, static_cast<int>(template_id)));
+                    }
+                }
+            }
+        }
+
+
+        // Locally refine each match by marching up the pyramid
+        for (int l = pyramid_levels - 2; l >= 0; --l)
+        {
+            const std::vector<LinearMemories> &lms = lm_pyramid[l];
+            int T = T_at_level[l];
+            int start = static_cast<int>(l);
+            Size size = sizes[l];
+            int border = 8 * T;
+            int offset = /*T / 2 +*/ (T % 2 - 1); // spread has no offset now
+            int max_x = size.width - tp[start].width - border;
+            int max_y = size.height - tp[start].height - border;
+
+            Mat similarities2;
+            for (int m = 0; m < (int)candidates.size(); ++m)
+            {
+                Match &match2 = candidates[m];
+                int x = match2.x * 2 + 1; /// @todo Support other pyramid distance
+                int y = match2.y * 2 + 1;
+
+                // Require 8 (reduced) row/cols to the up/left
+                x = std::max(x, border);
+                y = std::max(y, border);
+
+                // Require 8 (reduced) row/cols to the down/left, plus the template size
+                x = std::min(x, max_x);
+                y = std::min(y, max_y);
+
+                // Compute local similarity maps for each ColorGradient
+                int numFeatures = 0;
 
                 {
-                    const Template& templ = tp[lowest_start];
-                    num_features += static_cast<int>(templ.features.size());
+                    const Template &templ = tp[start];
+                    numFeatures += static_cast<int>(templ.features.size());
 
-                    if (templ.features.size() < 64) {
-                        similarity_64(lowest_lm[0], templ, similarities, sizes.back(), lowest_T);
-                        similarities.convertTo(similarities, CV_16U);
-                    }
-                    else if (templ.features.size() < 8192) {
-                        similarity(lowest_lm[0], templ, similarities, sizes.back(), lowest_T);
-                    }
-                    else {
+                    if (templ.features.size() < 64){
+                        similarityLocal_64(lms[0], templ, similarities2, size, T, Point(x, y));
+                        similarities2.convertTo(similarities2, CV_16U);
+                    }else if (templ.features.size() < 8192){
+                        similarityLocal(lms[0], templ, similarities2, size, T, Point(x, y));
+                    }else{
                         CV_Error(Error::StsBadArg, "feature size too large");
                     }
                 }
 
-                // Find initial matches
-                for (int r = 0; r < similarities.rows; ++r)
+                // Find best local adjustment
+                float best_score = 0;
+                int best_r = -1, best_c = -1;
+                for (int r = 0; r < similarities2.rows; ++r)
                 {
-                    ushort* row = similarities.ptr<ushort>(r);
-                    for (int c = 0; c < similarities.cols; ++c)
+                    ushort *row = similarities2.ptr<ushort>(r);
+                    for (int c = 0; c < similarities2.cols; ++c)
                     {
-                        int raw_score = row[c];
-                        float score = (raw_score * 100.f) / (4 * num_features);
+                        int score_int = row[c];
+                        float score = (score_int * 100.f) / (4 * numFeatures);
 
-                        if (score > threshold)
+                        if (score > best_score)
                         {
-                            int offset = lowest_T / 2 + (lowest_T % 2 - 1);
-                            int x = c * lowest_T + offset;
-                            int y = r * lowest_T + offset;
-                            candidates.push_back(Match(x, y, score, class_id, static_cast<int>(template_id)));
+                            best_score = score;
+                            best_r = r;
+                            best_c = c;
                         }
                     }
                 }
+                // Update current match
+                match2.similarity = best_score;
+                match2.x = (x / T - 8 + best_c) * T + offset;
+                match2.y = (y / T - 8 + best_r) * T + offset;
             }
 
-
-            // Locally refine each match by marching up the pyramid
-            for (int l = pyramid_levels - 2; l >= 0; --l)
-            {
-                const std::vector<LinearMemories>& lms = lm_pyramid[l];
-                int T = T_at_level[l];
-                int start = static_cast<int>(l);
-                Size size = sizes[l];
-                int border = 8 * T;
-                int offset = T / 2 + (T % 2 - 1);
-                int max_x = size.width - tp[start].width - border;
-                int max_y = size.height - tp[start].height - border;
-
-                Mat similarities2;
-                for (int m = 0; m < (int)candidates.size(); ++m)
-                {
-                    Match& match2 = candidates[m];
-                    int x = match2.x * 2 + 1; /// @todo Support other pyramid distance
-                    int y = match2.y * 2 + 1;
-
-                    // Require 8 (reduced) row/cols to the up/left
-                    x = std::max(x, border);
-                    y = std::max(y, border);
-
-                    // Require 8 (reduced) row/cols to the down/left, plus the template size
-                    x = std::min(x, max_x);
-                    y = std::min(y, max_y);
-
-                    // Compute local similarity maps for each ColorGradient
-                    int numFeatures = 0;
-
-                    {
-                        const Template& templ = tp[start];
-                        numFeatures += static_cast<int>(templ.features.size());
-
-                        if (templ.features.size() < 64) {
-                            similarityLocal_64(lms[0], templ, similarities2, size, T, Point(x, y));
-                            similarities2.convertTo(similarities2, CV_16U);
-                        }
-                        else if (templ.features.size() < 8192) {
-                            similarityLocal(lms[0], templ, similarities2, size, T, Point(x, y));
-                        }
-                        else {
-                            CV_Error(Error::StsBadArg, "feature size too large");
-                        }
-                    }
-
-                    // Find best local adjustment
-                    float best_score = 0;
-                    int best_r = -1, best_c = -1;
-                    for (int r = 0; r < similarities2.rows; ++r)
-                    {
-                        ushort* row = similarities2.ptr<ushort>(r);
-                        for (int c = 0; c < similarities2.cols; ++c)
-                        {
-                            int score_int = row[c];
-                            float score = (score_int * 100.f) / (4 * numFeatures);
-
-                            if (score > best_score)
-                            {
-                                best_score = score;
-                                best_r = r;
-                                best_c = c;
-                            }
-                        }
-                    }
-                    // Update current match
-                    match2.similarity = best_score;
-                    match2.x = (x / T - 8 + best_c) * T + offset;
-                    match2.y = (y / T - 8 + best_r) * T + offset;
-                }
-
-                // Filter out any matches that drop below the similarity threshold
-                std::vector<Match>::iterator new_end = std::remove_if(candidates.begin(), candidates.end(),
-                    MatchPredicate(threshold));
-                candidates.erase(new_end, candidates.end());
-            }
-
-            match_private.insert(match_private.end(), candidates.begin(), candidates.end());
+            // Filter out any matches that drop below the similarity threshold
+            std::vector<Match>::iterator new_end = std::remove_if(candidates.begin(), candidates.end(),
+                                                                  MatchPredicate(threshold));
+            candidates.erase(new_end, candidates.end());
         }
-#ifdef _OPENMP
-#pragma omp critical
-        {
-#endif
-            matches.insert(matches.end(), match_private.begin(), match_private.end());
-#ifdef _OPENMP
-        }
+
+        matches.insert(matches.end(), candidates.begin(), candidates.end());
     }
-#endif
 }
 
 int Detector::addTemplate(const Mat source, const std::string &class_id,
@@ -1471,7 +1514,7 @@ int Detector::addTemplate(const Mat source, const std::string &class_id,
         Ptr<ColorGradientPyramid> qp = modality->process(source, object_mask);
 
         if(num_features > 0)
-        qp->num_features = num_features;
+            qp->num_features = num_features;
 
         for (int l = 0; l < pyramid_levels; ++l)
         {
