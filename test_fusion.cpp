@@ -10,7 +10,12 @@ using namespace cv;
 
 #include "fusion.h"
 
-static std::string prefix = "/home/rfjiang/shape_based_matching/test/";
+// 测试数据目录: 优先用 CMake 注入的绝对路径(见 CMakeLists 的 TEST_DATA_DIR)
+#ifdef TEST_DATA_DIR
+static std::string prefix = TEST_DATA_DIR;
+#else
+static std::string prefix = "test/";
+#endif
 void gauss_test()
 {
     // only support gray img now

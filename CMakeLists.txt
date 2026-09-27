@@ -386,7 +386,7 @@ add_executable(${PROJECT_NAME}_test_fusion line2Dup.cpp test_fusion.cpp)
 # 把测试数据目录的绝对路径写进程序，运行时不再依赖工作目录
 target_compile_definitions(${PROJECT_NAME}_test_fusion PRIVATE
     TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/")
-target_link_libraries(${PROJECT_NAME}_test_fusion ${OpenCV_LIBS})
+target_link_libraries(${PROJECT_NAME}_test_fusion ${OpenCV_LIBS} cuda_icp)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(${PROJECT_NAME}_test_fusion OpenMP::OpenMP_CXX)
 endif()

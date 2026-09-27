@@ -1268,6 +1268,9 @@ namespace
 
 std::vector<Match> Detector::match(Mat source, const MatchParams& params)
 {
+    // ICP 精修依赖 dx_/dy_; fusion 流水线下默认不输出, 这里按需打开
+    // (refine 的报错信息提示"先调 match()", 对 fusion 版本来说真正的前提是本开关)
+    set_produce_dxy = params.use_refine;
     // 1+2. 底层匹配, 并按 min_confidence / class_ids 过滤
     std::vector<Match> ms = match(source, params.min_confidence, params.class_ids, params.masks);
 
@@ -1367,11 +1370,17 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                           const std::string &class_id,
                           const std::vector<TemplatePyramid> &template_pyramids) const
 {
-#pragma omp declare reduction \
-    (omp_insert: std::vector<Match>: omp_out.insert(omp_out.end(), omp_in.begin(), omp_in.end()))
-
-#pragma omp parallel for reduction(omp_insert:matches)
-    for (size_t template_id = 0; template_id < template_pyramids.size(); ++template_id)
+    // 注意: MSVC 的 OpenMP 2.0 不支持 declare reduction 自定义归约,
+    // 这里用传统 parallel + 线程私有缓冲 + critical 汇总的方式收集结果
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+        std::vector<Match> match_private;
+#ifdef _OPENMP
+#pragma omp for nowait
+#endif
+    for (int template_id = 0; template_id < (int)template_pyramids.size(); ++template_id)
     {
         const TemplatePyramid &tp = template_pyramids[template_id];
         // First match over the whole image at the lowest pyramid level
@@ -1496,7 +1505,14 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             candidates.erase(new_end, candidates.end());
         }
 
-        matches.insert(matches.end(), candidates.begin(), candidates.end());
+        match_private.insert(match_private.end(), candidates.begin(), candidates.end());
+    }
+
+    // 汇总各线程的私有结果到公共列表
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+    matches.insert(matches.end(), match_private.begin(), match_private.end());
     }
 }
 

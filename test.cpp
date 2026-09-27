@@ -109,24 +109,7 @@ void NMSBoxes(const std::vector<Rect>& bboxes, const std::vector<float>& scores,
 
 }
 
-class Timer
-{
-public:
-    Timer() : beg_(clock_::now()) {}
-    void reset() { beg_ = clock_::now(); }
-    double elapsed() const {
-        return std::chrono::duration_cast<second_>
-            (clock_::now() - beg_).count(); }
-    void out(std::string message = ""){
-        double t = elapsed();
-        std::cout << message << "\nelasped time:" << t << "s" << std::endl;
-        reset();
-    }
-private:
-    typedef std::chrono::high_resolution_clock clock_;
-    typedef std::chrono::duration<double, std::ratio<1> > second_;
-    std::chrono::time_point<clock_> beg_;
-};
+// Timer 类已在 line2Dup.h 中定义(fusion 合并引入, 带 record/display 功能), 这里直接使用
 
 void angle_test(string mode = "test", bool viewICP = false){
     line2Dup::Detector detector(128, {4, 8});
