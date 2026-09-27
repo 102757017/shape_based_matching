@@ -421,6 +421,11 @@ LoadedClass MatcherCore::add_template_class(const std::string& path_str,
     }
 
     // ---------- 5. 读 YAML (整文件进内存, MEMORY 模式解析, 中文目录无碍) ----------
+    // 重训场景: 同名类别已在句柄里时先移除旧模板, 实现"重新加载 = 替换"语义。
+    // 否则 Detector::readClass 里的 CV_Assert(类别不存在) 会断言失败,
+    // 调用方若无检查, 旧模板就原样留在句柄里继续参与匹配(典型症状:
+    // 重训带排除区后匹配结果与重训前一模一样, 特征点仍落在排除区内)。
+    detector_.remove_class(class_id);
     std::string yaml_buf = read_bytes_utf8(yaml_path);
     cv::FileStorage rfs(yaml_buf, cv::FileStorage::READ | cv::FileStorage::MEMORY);
     detector_.readClass(rfs.root());

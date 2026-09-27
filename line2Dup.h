@@ -468,6 +468,15 @@ namespace line2Dup
         // 添加 clear_classes 方法(同时清掉训练 mask 缓存)
         void clear_classes() { class_templates.clear(); class_masks.clear(); }
 
+        // 移除单个类别(重训/替换模板用): 类别不存在时静默返回, 不报错
+        // 配合 MatcherCore::add_template_class 实现"同名类别重新加载 = 替换"语义,
+        // 否则 readClass 的 CV_Assert 会让同句柄二次加载静默失败, 旧模板一直参与匹配
+        void remove_class(const std::string& class_id)
+        {
+            class_templates.erase(class_id);
+            class_masks.erase(class_id);
+        }
+
         cv::Mat dx_, dy_; // dx dy recorded for icp
 
         /**

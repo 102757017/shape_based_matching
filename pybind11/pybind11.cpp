@@ -91,6 +91,8 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def("writeClasses", &line2Dup::Detector::writeClasses, py::arg("format") = "templates_%s.yml.gz")
         // 修复 clear_classes 的绑定
         .def("clear_classes", static_cast<void (line2Dup::Detector::*)()>(&line2Dup::Detector::clear_classes))
+        // 移除单个类别(重训/替换模板用), 类别不存在时静默返回
+        .def("remove_class", &line2Dup::Detector::remove_class, py::arg("class_id"))
         .def("readClasses", &line2Dup::Detector::readClasses,
             py::arg("class_ids") = std::vector<std::string>(), py::arg("format") = "templates_%s.yml.gz")
         // 两个 match 重载: 简化版(阈值) 与 完整参数版(MatchParams), 必须显式消歧
