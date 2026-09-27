@@ -6,6 +6,8 @@
 # ============================================================
 # build/ 是 CMake 构建目录, 同时是 pybind 扩展 .pyd 的输出位置
 build/
+# build-sse2/ 是 SSE2 变体的独立 CMake 构建目录
+build-sse2/
 # out/ 是 Visual Studio 默认输出目录 (.obj / .pdb / .bin)
 out/
 CMakeFiles/
@@ -15,7 +17,11 @@ install_manifest.txt
 compile_commands.json
 
 # 编译中间产物与链接输出
+# 注意: CMake 会把 opencv_world4130.dll 等运行时与构建产物
+# copy 到项目根目录, 这里统一忽略, 不要入库 (体积大且 machine specific)
+*.dll
 *.pyd
+*.lib
 *.obj
 *.exp
 *.ilk
@@ -43,7 +49,11 @@ CMakeLists.txt.user
 # Python
 # ============================================================
 __pycache__/
-*.py[cod]
+# 只忽略 Python 字节码 .pyc / .pyo
+# 不要写 *.py[cod] —— 它的 [cod] 会顺带吃掉 pybind 扩展模块 .pyd,
+# 本项目 shape_based_matching_py.cp311-win_amd64.pyd 就是这种产物
+*.pyc
+*.pyo
 .venv/
 venv/
 dist/
@@ -68,6 +78,8 @@ py_tests/离屏验证输出/
 # .workbuddy/ 是本地工作区数据 (笔记/截图), 不必入库;
 # 如果要把项目笔记一起提交, 删掉下面这一行。
 .workbuddy/
+# .debug_backup/ 是清理根目录调试产物时的暂存位置, 随时可手动删除
+.debug_backup/
 Thumbs.db
 Desktop.ini
 .DS_Store
