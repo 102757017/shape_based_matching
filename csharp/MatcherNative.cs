@@ -655,6 +655,113 @@ namespace ShapeBasedMatching
 
         [DllImport(Dll, CallingConvention = Call)]
         internal static extern IntPtr sbm_last_error(IntPtr h);
+
+        [DllImport(Dll, CallingConvention = Call)]
+        internal static extern void sbm_ellipse_params_init(ref EllipseParams p);
+
+        // 只取数量: outEllipses 传 NULL
+        [DllImport(Dll, EntryPoint = "sbm_detect_ellipses", CallingConvention = Call)]
+        internal static extern int sbm_detect_ellipses_count(ref RawImage image, ref EllipseParams p,
+            IntPtr outEllipses, int maxEllipses);
+
+        // 取结果: Ellipse 是全 double 的 blittable struct, 数组被钉定直接由原生侧填充
+        [DllImport(Dll, EntryPoint = "sbm_detect_ellipses", CallingConvention = Call)]
+        internal static extern int sbm_detect_ellipses(ref RawImage image, ref EllipseParams p,
+            [In, Out] Ellipse[] outEllipses, int maxEllipses);
+    }
+
+    // ============================ 椭圆检测 ============================
+
+    /// <summary>椭圆检测参数 (对应 sbm_ellipse_params_t)。
+    /// 默认值与 C++ 侧硬编码行为一致; 阈值调低可检出被遮挡更严重的椭圆, 但误检增多。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct EllipseParams
+    {
+        /// <summary>椭圆极性: -1/0/1, 0 = 检测所有极性</summary>
+        public int Polarity;
+        /// <summary>椭圆线宽(像素), 默认 2.0</summary>
+        public double LineWidth;
+        /// <summary>完整度门槛(度), 默认 240</summary>
+        public double MinCoverAngle;
+        /// <summary>最终质量门槛, 默认 0.4</summary>
+        public double MinGoodness;
+        /// <summary>候选粗筛门槛, 默认 0.3</summary>
+        public double CandidateGoodness;
+
+        /// <summary>一份与 C++ 侧一致的默认参数</summary>
+        public static EllipseParams Default()
+        {
+            EllipseParams p = new EllipseParams();
+            Native.sbm_ellipse_params_init(ref p);
+            return p;
+        }
+    }
+
+    /// <summary>单个椭圆检测结果 (blittable struct, 字段布局对应 sbm_ellipse_t)。
+    /// 坐标口径: CenterX=列(x), CenterY=行(y); Phi 为相对图像 x(列)轴的旋转角(弧度),
+    /// 与 OpenCV cv::ellipse / RotatedRect 的角度口径一致, 可直接用于绘制。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Ellipse
+    {
+        public double CenterX;     /* 中心列 (x) */
+        public double CenterY;     /* 中心行 (y) */
+        /// <summary>半长轴</summary>
+        public double A;
+        /// <summary>半短轴</summary>
+        public double B;
+        /// <summary>相对 x(列)轴的旋转角(弧度), cv::ellipse 口径</summary>
+        public double Phi;
+        /// <summary>质量评分 (0~1, 越高越好)</summary>
+        public double Goodness;
+        /// <summary>角度完整程度 (度, 360=完整)</summary>
+        public double CoverAngle;
+    }
+
+    /// <summary>椭圆检测 (无句柄, 静态方法)。</summary>
+    public static class EllipseDetector
+    {
+        /// <summary>在灰度/3通道图像中检测椭圆, 返回按 Goodness 降序排列的结果。</summary>
+        public static Ellipse[] Detect(RawImage image, EllipseParams p)
+        {
+            int cap = 64;
+            while (true)
+            {
+                Ellipse[] buf = new Ellipse[cap];
+                int n = Native.sbm_detect_ellipses(ref image, ref p, buf, cap);
+                if (n < 0)
+                    throw new InvalidOperationException("sbm_detect_ellipses failed: " +
+                        Utf8.PtrToString(Native.sbm_last_error(IntPtr.Zero)));
+                if (n <= cap)
+                {
+                    if (n == cap) return buf;
+                    Array.Resize(ref buf, n);
+                    return buf;
+                }
+                cap = n;   // 检出数超过缓冲, 扩容重试
+            }
+        }
+
+        /// <summary>byte[] 便捷重载: grayData 为行优先连续内存, stride 传 0 表示 width(无填充)。</summary>
+        public static Ellipse[] Detect(byte[] grayData, int width, int height,
+                                       int stride, EllipseParams p)
+        {
+            if (grayData == null) throw new ArgumentNullException("grayData");
+            GCHandle pinned = GCHandle.Alloc(grayData, GCHandleType.Pinned);
+            try
+            {
+                RawImage img = new RawImage();
+                img.Data = pinned.AddrOfPinnedObject();
+                img.Width = width;
+                img.Height = height;
+                img.Channels = 1;
+                img.Step = stride;
+                return Detect(img, p);
+            }
+            finally
+            {
+                pinned.Free();
+            }
+        }
     }
 
     // ============================ 非托管内存小工具 ============================

@@ -4,6 +4,7 @@
 #include "matcher_c.h"
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 #include <cstring>
 #include <map>
 #include <string>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "../core/matcher_core.h"
+#include "../third_party/ellipse_detection/include/detect.h"
 
 namespace {
 
@@ -429,9 +431,94 @@ int sbm_match_result(void* handle, int index, sbm_match_result_t* out) {
     return 0;
 }
 
+/* ============================ 椭圆检测 ============================ */
+// 无句柄的纯函数式接口; 错误串放在文件级缓冲, 用 sbm_last_error(NULL) 取。
+namespace {
+std::string g_ellipse_last_error;
+
+zgh::DetectParams ellipse_params_from_c(const sbm_ellipse_params_t* p) {
+    // 约定与其它参数结构一致: NULL / <=0 一律解释为"用默认"
+    zgh::DetectParams out;   // 默认成员值 == 原版硬编码行为
+    if (!p) return out;
+    if (p->polarity != 0) out.polarity = p->polarity;
+    if (p->line_width > 0.0) out.line_width = p->line_width;
+    if (p->min_cover_angle > 0.0) out.min_cover_angle = p->min_cover_angle;
+    if (p->min_goodness > 0.0) out.min_goodness = p->min_goodness;
+    if (p->candidate_goodness > 0.0) out.candidate_goodness = p->candidate_goodness;
+    return out;
+}
+}  // namespace
+
+SBM_API void sbm_ellipse_params_init(sbm_ellipse_params_t* params) {
+    if (!params) return;
+    std::memset(params, 0, sizeof(*params));
+    params->polarity = 0;
+    params->line_width = 2.0;
+    params->min_cover_angle = 240.0;
+    params->min_goodness = 0.4;
+    params->candidate_goodness = 0.3;
+}
+
+SBM_API int sbm_detect_ellipses(const sbm_image_t* image,
+                                const sbm_ellipse_params_t* params,
+                                sbm_ellipse_t* out_ellipses,
+                                int max_ellipses) {
+    g_ellipse_last_error.clear();
+    try {
+        if (max_ellipses < 0) max_ellipses = 0;
+        cv::Mat m = image_to_mat(image);
+        if (m.empty()) {
+            g_ellipse_last_error = "sbm_detect_ellipses: invalid image (null data or zero size)";
+            return -1;
+        }
+        cv::Mat gray;
+        if (m.channels() == 3) {
+            cv::cvtColor(m, gray, cv::COLOR_BGR2GRAY);
+        } else {
+            gray = m;
+        }
+
+        const zgh::DetectParams ep = ellipse_params_from_c(params);
+        std::vector<std::shared_ptr<zgh::Ellipse>> ells;
+        zgh::detectEllipse(gray.data, gray.rows, gray.cols, ells, ep);
+
+        const int n = static_cast<int>(ells.size());
+        // out_ellipses 为 NULL 时只统计数量, 不写结果
+        int write_n = 0;
+        if (out_ellipses && max_ellipses > 0) {
+            write_n = (max_ellipses < n) ? max_ellipses : n;
+        }
+        for (int i = 0; i < write_n; ++i) {
+            const auto& e = ells[i];
+            sbm_ellipse_t& o = out_ellipses[i];
+            // 库内部约定: o.x=行, o.y=列, phi 在(行,列)平面测量。
+            // 对外统一换成 (列=x, 行=y) + cv::ellipse 口径: phi_cv = 90° - phi。
+            o.cx = e->o.y;
+            o.cy = e->o.x;
+            o.a = e->a;
+            o.b = e->b;
+            o.phi = CV_PI / 2.0 - e->phi;
+            o.goodness = e->goodness;
+            o.coverangle = e->coverangle;
+        }
+        return n;   // 返回总检出数; 只写了前 write_n 个
+    } catch (const std::exception& e) {
+        g_ellipse_last_error = std::string("sbm_detect_ellipses: ") + e.what();
+        return -2;
+    } catch (...) {
+        g_ellipse_last_error = "unknown error in sbm_detect_ellipses";
+        return -3;
+    }
+}
+
 const char* sbm_last_error(void* handle) {
     SbmHandle* h = as_handle(handle);
-    if (!h || h->last_error.empty()) return nullptr;
+    if (!h) {
+        // 无句柄调用(如 sbm_detect_ellipses)的错误串
+        if (!g_ellipse_last_error.empty()) return g_ellipse_last_error.c_str();
+        return nullptr;
+    }
+    if (h->last_error.empty()) return nullptr;
     return h->last_error.c_str();
 }
 

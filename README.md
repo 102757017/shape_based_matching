@@ -137,6 +137,41 @@ zgh::detectEllipse(gray.data, gray.rows, gray.cols, ells, params);
 
 NOTE coordinate convention: `Ellipse::o.x` is the **row** and `o.y` is the **col**; `phi` is measured in the (row, col) plane. When drawing with `cv::ellipse`, use center `(o.y, o.x)`, axes `(a, b)` and angle `90° - phi`. `ellipse_debug.exe` dumps per-stage intermediates (gradient, arcs, candidates) for troubleshooting.
 
+### Python binding
+
+```python
+import shape_based_matching_py as sbm   # build/Release/shape_based_matching_py.cp311-win_amd64.pyd
+ells = sbm.detect_ellipses(gray_or_bgr_u8)          # 默认参数
+p = sbm.EllipseParams()                             # 阈值可调
+p.min_cover_angle, p.min_goodness = 150, 0.25
+ells = sbm.detect_ellipses(img, p)
+# 每项: center_row/center_col/a/b/phi(度, cv::ellipse 口径)/goodness/coverangle/polarity
+```
+Smoke test: `python py_tests/test_detect_ellipses.py` (在 build/Release 下运行)。
+
+### C ABI (任何语言)
+
+```c
+#include "c_api/matcher_c.h"
+sbm_ellipse_params_t p; sbm_ellipse_params_init(&p);
+p.min_cover_angle = 150;
+sbm_ellipse_t out[64];
+int n = sbm_detect_ellipses(&image, &p, out, 64);   // n = 检出数, 按 goodness 降序
+```
+坐标口径: `cx=列(x), cy=行(y)`, `phi` 为相对 x 轴弧度 (cv::ellipse 兼容)。错误详情 `sbm_last_error(NULL)`。
+
+### C# (P/Invoke)
+
+`csharp/MatcherNative.cs` 已含 `EllipseParams` / `Ellipse` / `EllipseDetector`:
+```csharp
+var p = EllipseParams.Default();
+p.MinCoverAngle = 150;
+Ellipse[] ells = EllipseDetector.Detect(grayBytes, width, height, stride: 0, p);
+// 或用 RawImage 包住 OpenCvSharp Mat.Data (行优先连续内存)
+```
+可运行示例: `csharp/EllipseDetectSample/` (`dotnet run` 直接体验, 内含零依赖的 24 位 BMP 解码)。
+原生依赖: `shape_based_matching_c.dll` + `opencv_world4130.dll` (均在 build/Release)。
+
 ## some issues you may want to know  
 Well, issues are not clearly classified and many questions are discussed in one issue sometimes. For better reference, some typical discussions are pasted here.  
 

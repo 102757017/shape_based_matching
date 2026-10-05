@@ -205,6 +205,40 @@ SBM_API int sbm_match(void* handle,
 /* 取第 index 个匹配结果 (0 <= index < sbm_match 的返回值) */
 SBM_API int sbm_match_result(void* handle, int index, sbm_match_result_t* out);
 
+/* ============================ 椭圆检测 ============================
+ * 集成自 standard-ellipse-detection (MIT), 适合检测图中标准/明显/较完整的
+ * 椭圆(建议长短轴 100px 量级以上)。无句柄, 纯函数式调用。 */
+typedef struct sbm_ellipse_params_t {
+    int polarity;               /* 椭圆极性: -1/0/1, 0 = 检测所有极性 */
+    double line_width;          /* 椭圆线宽(像素), <=0 -> 2.0 */
+    double min_cover_angle;     /* 完整度门槛(度), 弧覆盖角低于该值被丢弃, <=0 -> 240。
+                                 * 调低可检出被遮挡更严重的椭圆, 但误检/拟合偏差会增多 */
+    double min_goodness;        /* 最终质量门槛, <=0 -> 0.4, 同上 */
+    double candidate_goodness;  /* 候选粗筛门槛, <=0 -> 0.3 */
+} sbm_ellipse_params_t;
+
+/* 单个椭圆结果。
+ * 坐标口径: cx=列(x), cy=行(y); phi 为相对图像 x(列)轴的旋转角(弧度),
+ * 与 OpenCV cv::ellipse / RotatedRect 的角度口径一致, 可直接用于绘制。 */
+typedef struct sbm_ellipse_t {
+    double cx, cy;      /* 中心 */
+    double a, b;        /* 半长轴, 半短轴 */
+    double phi;         /* 相对 x(列)轴的旋转角, 弧度 */
+    double goodness;    /* 质量评分 (0~1, 越高越好) */
+    double coverangle;  /* 角度完整程度 (度, 360=完整) */
+} sbm_ellipse_t;
+
+/* 填一份默认参数 (polarity=0, line_width=2.0, min_cover_angle=240, ...) */
+SBM_API void sbm_ellipse_params_init(sbm_ellipse_params_t* params);
+
+/* 椭圆检测。image 支持 1(灰度)/3(BGR) 通道, 内部自动转灰度。
+ * 返回写入 out_ellipses 的结果个数 (>=0, 按 goodness 降序), 负数为错误码,
+ * 详情用 sbm_last_error(NULL) 取。out_ellipses 可为 NULL 以只取数量。 */
+SBM_API int sbm_detect_ellipses(const sbm_image_t* image,
+                                const sbm_ellipse_params_t* params,   /* NULL = 全默认 */
+                                sbm_ellipse_t* out_ellipses,
+                                int max_ellipses);
+
 /* ============================ 错误 ============================ */
 SBM_API const char* sbm_last_error(void* handle);
 

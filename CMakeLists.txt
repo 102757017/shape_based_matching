@@ -262,7 +262,7 @@ if (USE_C_ABI)
         "${CMAKE_CURRENT_SOURCE_DIR}/core"
         "${CMAKE_CURRENT_SOURCE_DIR}/c_api"
     )
-    target_link_libraries(${PROJECT_NAME}_c PRIVATE ${PROJECT_NAME}_core)
+    target_link_libraries(${PROJECT_NAME}_c PRIVATE ${PROJECT_NAME}_core ellipse_detection)
     if(MSVC)
         # 与 pybind 模块一致: Debug 也用 release CRT(/MD)
         target_compile_options(${PROJECT_NAME}_c PRIVATE "$<$<CONFIG:Debug>:/MD>")
@@ -383,6 +383,7 @@ if (USE_PYBIND)
     endif()
     target_link_libraries(${PROJECT_NAME}_py PRIVATE
         ${PROJECT_NAME}_core        # 纯 C++ 内核 (静态链接, 不含 Python 依赖)
+        ellipse_detection           # 椭圆检测 (detect_ellipses)
         ${OpenCV_LIBS}
         cuda_icp
     )

@@ -3,6 +3,7 @@
 #include "np2mat/ndarray_converter.h"
 #include "../line2Dup.h"
 #include "py_matcher.h"
+#include "../third_party/ellipse_detection/include/detect.h"
 namespace py = pybind11;
 
 PYBIND11_MODULE(shape_based_matching_py, m) {
@@ -175,4 +176,57 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
             py::arg("negative_mask") = py::none(),
             py::arg("exclusion_zones") = py::none(),
             py::arg("options") = py::none());
+
+    // ============ 椭圆检测 (third_party/ellipse_detection) ============
+    py::class_<zgh::DetectParams>(m, "EllipseParams")
+        .def(py::init<>())
+        .def_readwrite("polarity", &zgh::DetectParams::polarity,
+            "椭圆极性: -1/0/1, 0=检测所有极性")
+        .def_readwrite("line_width", &zgh::DetectParams::line_width,
+            "椭圆线宽(像素), 默认 2.0")
+        .def_readwrite("min_cover_angle", &zgh::DetectParams::min_cover_angle,
+            "完整度门槛(度), 默认 240; 调低可检出被遮挡更严重的椭圆, 但误检增多")
+        .def_readwrite("min_goodness", &zgh::DetectParams::min_goodness,
+            "最终质量门槛, 默认 0.4")
+        .def_readwrite("candidate_goodness", &zgh::DetectParams::candidate_goodness,
+            "候选粗筛门槛, 默认 0.3");
+
+    // 输入: 灰度图(cv::Mat/np.uint8 二维数组, 3 通道 BGR 会自动转灰度) + EllipseParams。
+    // 输出: list[dict], 按 goodness 降序:
+    //   center_row, center_col : 中心 (行, 列)
+    //   a, b                   : 半长轴, 半短轴
+    //   phi                    : 相对列轴的旋转角(度), 与 cv::ellipse 角度口径一致
+    //   goodness, coverangle   : 质量评分(0~1), 角度完整程度(度, 360=完整)
+    m.def("detect_ellipses",
+        [](const cv::Mat& image, const zgh::DetectParams& params) {
+            cv::Mat gray;
+            if (image.channels() == 3) {
+                cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+            } else {
+                gray = image;
+            }
+            if (gray.depth() != CV_8U)
+                throw std::invalid_argument("detect_ellipses: 图像必须是 uint8 灰度图");
+
+            std::vector<std::shared_ptr<zgh::Ellipse>> ells;
+            zgh::detectEllipse(gray.data, gray.rows, gray.cols, ells, params);
+
+            py::list out;
+            for (const auto& e : ells) {
+                py::dict d;
+                // 库内部约定: o.x=行, o.y=列, phi 在(行,列)平面; 对外换算成 cv 口径
+                d["center_row"] = e->o.x;
+                d["center_col"] = e->o.y;
+                d["a"] = e->a;
+                d["b"] = e->b;
+                d["phi"] = 90.0 - e->phi * 180.0 / CV_PI;
+                d["goodness"] = e->goodness;
+                d["coverangle"] = e->coverangle;
+                d["polarity"] = e->polarity;
+                out.append(d);
+            }
+            return out;
+        },
+        py::arg("image"), py::arg("params") = zgh::DetectParams(),
+        "检测图中的椭圆。返回 list[dict]: center_row/center_col/a/b/phi(度, cv::ellipse 口径)/goodness/coverangle/polarity");
 }
