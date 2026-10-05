@@ -193,6 +193,23 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(${PROJECT_NAME}_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+# ============ 椭圆检测(第三方, MIT) ============
+# 来源: https://github.com/memory-overflow/standard-ellipse-detection
+# 已适配 OpenCV 4 并移除无用 LAPACK 依赖, 详见 third_party/ellipse_detection/CMakeLists.txt
+option(USE_ELLIPSE_DETECTION "Build ellipse_detection library and demo" ON)
+if(USE_ELLIPSE_DETECTION)
+    add_subdirectory(third_party/ellipse_detection)
+
+    # 椭圆检测 demo exe
+    add_executable(ellipse_detect_demo ellipse_detect_demo.cpp)
+    target_link_libraries(ellipse_detect_demo PRIVATE ellipse_detection ${OpenCV_LIBS})
+
+    # 椭圆检测调试 exe(逐级输出中间结果)
+    add_executable(ellipse_debug ellipse_debug.cpp)
+    target_link_libraries(ellipse_debug PRIVATE ellipse_detection ${OpenCV_LIBS})
+    target_compile_definitions(ellipse_debug PRIVATE ELLIPSE_DEBUG_PROBE)
+endif()
+
 # OpenCV 运行时 DLL 所在目录 (供 pybind 模块与 C ABI 模块拷贝依赖)
 set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
 

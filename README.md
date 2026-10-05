@@ -97,6 +97,46 @@ test img & templ features
 
 ![test2](test/case2/result/together.png)  
 
+## ellipse detection (integrated)
+
+Integrated [standard-ellipse-detection](https://github.com/memory-overflow/standard-ellipse-detection) (MIT) as a submodule library at `third_party/ellipse_detection/`.
+
+Adaptations for this project (OpenCV 4.13 + MSVC, no LAPACK):
+1. Replaced the vestigial LAPACK `dggev_` call in `fitEllipse` with `Eigen::GeneralizedEigenSolver` (same semantics: eigenvalue = alpha/beta). Eigen path: `EIGEN3_ROOT` (same as cuda_icp).
+2. Rewrote `cvcannyapi.cpp` from OpenCV C API (`CvMat`/`cvGetMat`/`cvSobel`) to OpenCV 4 C++ API; algorithm unchanged.
+3. Guards for Eigen port: 0-inlier fit returns `nullptr` (Eigen RealQZ hangs on all-zero matrices where LAPACK returned gracefully), NaN conic coefficients are rejected, and `EllipseIter` bails out on non-finite coefficients.
+
+Build (with the existing build dir):
+```
+cmake --build build --target ellipse_detect_demo --config Release
+```
+
+Usage:
+```
+build/Release/ellipse_detect_demo.exe <image> [output.png] [options]
+options:
+  --polarity <0|-1|1>          ellipse polarity, 0=all (default 0)
+  --line-width <px>            ellipse line width in pixels (default 2.0)
+  --min-cover-angle <deg>      coverage threshold in degrees (default 240)
+  --min-goodness <0~1>         final quality threshold (default 0.4)
+  --candidate-goodness <0~1>   candidate pre-filter threshold (default 0.3)
+```
+Lower `--min-cover-angle`/`--min-goodness` to detect more heavily occluded ellipses, at the cost of possible false/less accurate fits.
+
+API:
+```cpp
+#include "detect.h"
+// 1) 原签名(默认参数, 行为不变)
+zgh::detectEllipse(gray.data, gray.rows, gray.cols, ells, /*polarity=*/0, /*line_width=*/2.0);
+// 2) 参数结构体版本(阈值可调)
+zgh::DetectParams params;               // 默认值 == 原硬编码行为
+params.min_cover_angle = 150;           // 放宽完整度
+params.min_goodness = 0.25;             // 放宽质量
+zgh::detectEllipse(gray.data, gray.rows, gray.cols, ells, params);
+```
+
+NOTE coordinate convention: `Ellipse::o.x` is the **row** and `o.y` is the **col**; `phi` is measured in the (row, col) plane. When drawing with `cv::ellipse`, use center `(o.y, o.x)`, axes `(a, b)` and angle `90° - phi`. `ellipse_debug.exe` dumps per-stage intermediates (gradient, arcs, candidates) for troubleshooting.
+
 ## some issues you may want to know  
 Well, issues are not clearly classified and many questions are discussed in one issue sometimes. For better reference, some typical discussions are pasted here.  
 
