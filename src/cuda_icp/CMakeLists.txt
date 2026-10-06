@@ -18,13 +18,15 @@ if(USE_CUDA)
     list(APPEND icp_lib ${CUDA_LIBRARIES})
 endif()
 
-# eigen
-set(EIGEN3_ROOT "E:/programing/eigen-3.4.0" CACHE PATH "Eigen root directory")
-if(EXISTS "${EIGEN3_ROOT}/Eigen/Core")
+# eigen（查找顺序：-DEIGEN3_ROOT=... > 环境变量 EIGEN3_ROOT > 本机默认路径）
+if(NOT DEFINED EIGEN3_ROOT AND EXISTS "E:/programing/eigen-3.4.0")
+    set(EIGEN3_ROOT "E:/programing/eigen-3.4.0" CACHE PATH "Eigen root directory")
+endif()
+if(DEFINED EIGEN3_ROOT AND EXISTS "${EIGEN3_ROOT}/Eigen/Core")
     message(STATUS "Using Eigen from: ${EIGEN3_ROOT}")
     list(APPEND icp_inc ${EIGEN3_ROOT})
 else()
-    message(FATAL_ERROR "Eigen not found at: ${EIGEN3_ROOT}")
+    message(FATAL_ERROR "Eigen not found. Set EIGEN3_ROOT to a dir containing Eigen/Core (current: ${EIGEN3_ROOT}).")
 endif()
 
 # src

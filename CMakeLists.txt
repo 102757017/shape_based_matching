@@ -164,8 +164,16 @@ else()
 endif()
 
 # ============ OpenCV 4 ============
-# 指向 OpenCV 4.13.0 预编译包（如需更换版本/路径，修改下面一行即可）
-set(OpenCV_DIR "E:/programing/opencv-4.13.0/opencv/build" CACHE PATH "OpenCV directory")
+# OpenCV 查找顺序：1) 命令行 -DOpenCV_DIR=...  2) 环境变量 OpenCV_DIR
+#   3) 本机默认安装路径（仅在其存在时使用）。三者皆无时 find_package 会给出明确报错，
+#   便于换机器/换目录后直接指定，而不是写死绝对路径。
+if(NOT DEFINED OpenCV_DIR)
+    if(DEFINED ENV{OpenCV_DIR})
+        set(OpenCV_DIR "$ENV{OpenCV_DIR}" CACHE PATH "OpenCV directory")
+    elseif(EXISTS "E:/programing/opencv-4.13.0/opencv/build")
+        set(OpenCV_DIR "E:/programing/opencv-4.13.0/opencv/build" CACHE PATH "OpenCV directory")
+    endif()
+endif()
 find_package(OpenCV 4 REQUIRED)
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "OpenCV libs: ${OpenCV_LIBS}")

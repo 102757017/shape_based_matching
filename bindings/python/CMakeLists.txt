@@ -10,8 +10,10 @@ if(USE_PYBIND)
     # ---------- 1. 定位 Python 解释器 ----------
     if(DEFINED ENV{CONDA_PREFIX})
         set(PYTHON_EXECUTABLE "$ENV{CONDA_PREFIX}/python.exe" CACHE FILEPATH "Python executable")
-    else()
+    elseif(EXISTS "D:/portable program/python311/python.exe")
         set(PYTHON_EXECUTABLE "D:/portable program/python311/python.exe" CACHE FILEPATH "Python executable")
+    elseif(DEFINED ENV{PYTHON_EXECUTABLE})
+        set(PYTHON_EXECUTABLE "$ENV{PYTHON_EXECUTABLE}" CACHE FILEPATH "Python executable")
     endif()
 
     set(Python3_EXECUTABLE "${PYTHON_EXECUTABLE}" CACHE FILEPATH "Python3 executable" FORCE)

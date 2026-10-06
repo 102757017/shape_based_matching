@@ -9,7 +9,8 @@ os.environ.setdefault('DISTUTILS_USE_SDK', '1')
 os.environ.setdefault('MSSdk', '1')
 
 # ===== OpenCV 4.13.0 路径（预编译包解压位置）=====
-OPENCV_ROOT = r"E:\programing\opencv-4.13.0\opencv\build"
+# 可用环境变量 OPENCV_ROOT 覆盖，便于换机器/换目录后直接 pip install。
+OPENCV_ROOT = os.environ.get("OPENCV_ROOT", r"E:\programing\opencv-4.13.0\opencv\build")
 OPENCV_INCLUDE_DIR = os.path.join(OPENCV_ROOT, "include")
 OPENCV_LIB_DIR = os.path.join(OPENCV_ROOT, "x64", "vc16", "lib")
 # ========================================================
