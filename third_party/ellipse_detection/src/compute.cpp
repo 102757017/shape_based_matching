@@ -14,6 +14,7 @@
 #include <cfloat>
 
 #include "compute.h"
+#include "parallel.hpp"
 #include "defines.h"
 
 
@@ -495,7 +496,7 @@ static void gaussianKernel(std::vector<double> &kernel, double sigma, double mea
 
 bool gaussianSampler(const uint8_t *ori_data, int ori_row, int ori_col,
                      double *data, int row, int col,
-                     double scale, double sigma_scale) {
+                     double scale, double sigma_scale, int num_threads) {
   
   double *aux = new double[ori_row * col];
   double sigma = scale < 1.0 ? sigma_scale / scale : sigma_scale;
@@ -504,10 +505,14 @@ bool gaussianSampler(const uint8_t *ori_data, int ori_row, int ori_col,
   int n = 1 + 2 * h;
   std::vector<double> kernel(n);
 
-  for (int idy = 0; idy < col; ++idy) {
+  // 纵向卷积: 每个目标列 idy 独立写 aux[..][idy], 且各自算自己的高斯核。
+  // 按列并行; kernel 不能共用, 所以每个任务各持一份。
+  ThreadPool::instance().parallelFor(
+      col, [&](int idy) {
+    std::vector<double> kbuf(n);
     double yy = (double)idy / scale;
     int yc = (int)floor(yy + 0.5);
-    gaussianKernel(kernel, sigma, (double)h + yy - (double)yc);
+    gaussianKernel(kbuf, sigma, (double)h + yy - (double)yc);
     for (int idx = 0; idx < ori_row; ++idx) {
       double sum = 0.0;
       for (int dim = 0; dim < n; ++dim) {
@@ -521,16 +526,19 @@ bool gaussianSampler(const uint8_t *ori_data, int ori_row, int ori_col,
         if (j >= ori_col) {
           j = 2 * ori_col - 1 - j;
         }
-        sum += (double)ori_data[idx * ori_col + j] * kernel[dim];
+        sum += (double)ori_data[idx * ori_col + j] * kbuf[dim];
       }
       aux[idx * col + idy] = sum;
     }
-  }
+  }, num_threads);
 
-  for (int idx = 0; idx < row; ++idx) {
+  // 横向卷积: 每个目标行 idx 独立写 data[idx][..], 同样按行并行。
+  ThreadPool::instance().parallelFor(
+      row, [&](int idx) {
+    std::vector<double> kbuf(n);
     double xx = (double)idx / scale;
     int xc = (int)floor(xx + 0.5);
-    gaussianKernel(kernel, sigma, (double)h + xx - (double)xc);
+    gaussianKernel(kbuf, sigma, (double)h + xx - (double)xc);
     for (int idy = 0; idy < col; ++idy) {
       double sum = 0.0;
       for (int dim = 0; dim < n; ++dim) {
@@ -544,11 +552,11 @@ bool gaussianSampler(const uint8_t *ori_data, int ori_row, int ori_col,
         if (j >= ori_row) {
           j = 2 * ori_row - 1 - j;
         }
-        sum += aux[j * col + idy] * kernel[dim];
+        sum += aux[j * col + idy] * kbuf[dim];
       }
       data[idx * col + idy] = sum;
     }
-  }
+  }, num_threads);
   delete [] aux;
   return true;
 }

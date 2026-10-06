@@ -35,6 +35,11 @@ endif()
 
 target_compile_features(ellipse_detection PUBLIC cxx_std_17)
 
+# 多线程: 用自带的 ThreadPool(见 include/parallel.hpp), 不依赖 OpenMP。
+# 原因写在 parallel.hpp 头部 —— MSVC OpenMP 默认的 spin 等待策略会让短并行区
+# 倒亏, 而且发布产物会多一个 vcomp140.dll 依赖。
+# 用 DetectParams::num_threads 控制线程数(0=自动, 1=关闭并行)。
+
 if(MSVC)
     # 第三方代码警告较多, 降噪到 W2, 不影响主工程
     target_compile_options(ellipse_detection PRIVATE /W2 /wd4244 /wd4267 /wd4018 /wd4305)

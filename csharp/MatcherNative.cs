@@ -687,6 +687,8 @@ namespace ShapeBasedMatching
         public double MinGoodness;
         /// <summary>候选粗筛门槛, 默认 0.3</summary>
         public double CandidateGoodness;
+        /// <summary>并行线程数: 0/负数 = 自动(用满可用核), 1 = 关闭多线程, 默认 0</summary>
+        public int NumThreads;
 
         /// <summary>一份与 C++ 侧一致的默认参数</summary>
         public static EllipseParams Default()

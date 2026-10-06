@@ -19,9 +19,9 @@
 
 #include "defines.h"
 #include "unitily.h"
+#include "profile.hpp"
 
 namespace zgh {
-
 
 template <typename T>
 class Point_ {
@@ -152,8 +152,26 @@ class Ellipse {
   double distopoint(Pointd p);
   Vectord getTangent(Pointd p);
   Vectord getTangent(Pointi p);
+
+  // ------------------------------------------------------------------
+  // 内层循环(逐像素扫描)用的预计算几何量。
+  // distopoint 每次调用都要 cos/sin(phi) + 4 次 sqrt, 在扫描 26 万次时
+  // 是主要开销。这里把只随椭圆变化的量(三角函数、轴长平方)提到构造时算一次。
+  // fg 只在使用 refreshFast()/distFast() 时更新, 纯手工构造且不变的对象
+  // 不会失效(全代码库里 a/b/phi/o 只在构造函数与 fitEllipse 里赋值)。
+  // ------------------------------------------------------------------
+  struct FastGeom {
+    double ox = 0.0, oy = 0.0;
+    double cosn = 1.0, sinn = 0.0;   // cos(-phi), sin(-phi)
+    double ae2 = 0.0, be2 = 0.0, fe2 = 0.0;
+    double aa = 0.0, bb = 0.0;   // a / b(圆时用 aa 而不是 sqrt(ae2), 保证与 abs(a) 完全一致)
+    bool circle = false;
+  };
+  FastGeom fg;
+  void refreshFast();                          // 从当前 a/b/phi/o 重算 fg
+  double distFast(double px, double py) const; // 与 distopoint 数值一致
  private:
-  
+  mutable int fg_dirty = 1;                    // fg 是否需要重算
 };
 
 class RectIter {
@@ -161,7 +179,8 @@ class RectIter {
   RectIter(const std::shared_ptr<Lined> &line);
   Pointd polys[4];
   Pixel np;
-  RectIter operator ++ ();
+  // 同 EllipseIter: 前缀 ++ 改为返回引用, 避免每次推进都拷贝整个迭代器
+  RectIter& operator ++ ();
   RectIter operator ++ (int);
   bool isEnd();
  private:
@@ -176,7 +195,9 @@ class EllipseIter {
  public:
   EllipseIter(const std::shared_ptr<Ellipse> &ell_t, double distance_tolerance);
   Pixel np;
-  EllipseIter operator ++ ();
+  // 原实现返回 EllipseIter(按值), 每次 ++iter 都会深拷贝内部 std::stack
+  // (整列像素都在里面), 这是热点最大的单项开销。前缀版本改为返回引用。
+  EllipseIter& operator ++ ();
   EllipseIter operator ++ (int);
   bool isEnd();
  private:
@@ -662,32 +683,60 @@ inline bool Ellipse::equal(const std::shared_ptr<Ellipse> &eptr,
   return con1 && con4;
 }
 
-inline double Ellipse::distopoint(Pointd p) {
+inline void Ellipse::refreshFast() {
+  fg.ox = o.x;
+  fg.oy = o.y;
+  fg.cosn = std::cos(-phi);
+  fg.sinn = std::sin(-phi);
+  fg.ae2 = a * a;
+  fg.be2 = b * b;
+  fg.aa = a;
+  fg.bb = b;
+  fg.fe2 = a * a - b * b;
+  fg.bb = b;
+  fg.circle = isCircle();
+  fg_dirty = 0;
+}
 
-  Vectord pt = p - o;
-  pt.rotation(-phi);
-  double ae2 = a * a;
-  double be2 = b * b;
-  double fe2 = a * a - b * b;
-  if (isCircle()) {
-    return std::fabs((p - o).length() - a);
+inline double Ellipse::distFast(double px, double py) const {
+#if defined(SBM_ELLIPSE_PROFILE)
+  SBM_SUBPHASE(_ps_dist, "distFast_body");
+#endif
+  if (fg_dirty) {
+    const_cast<Ellipse*>(this)->refreshFast();
+  }
+  const FastGeom &g = fg;
+  const double dx = px - g.ox;
+  const double dy = py - g.oy;
+  if (g.circle) {
+    return std::fabs(sqrt(dx * dx + dy * dy) - g.aa);
   }
 
-  double X = sqr(pt.x);
-  double Y = sqr(pt.y);
+  const double rx = dx * g.cosn - dy * g.sinn;
+  const double ry = dx * g.sinn + dy * g.cosn;
 
-  double delta = sqr(X + Y + fe2) - 4 * fe2 * X;
-  double A = (X + Y + fe2 - sqrt(delta)) / 2.0;
-  double ah = sqrt(A);
-  double bh2 = fe2 - A;
-  double term = A * be2 + ae2 * bh2;
-  double xi = ah * sqrt(ae2 * (be2 + bh2) / term);
-  double yi = b * sqrt(bh2 * (ae2 - A) / term);
-  double d = sqr(pt.x - xi) + sqr(pt.y - yi);
-  d = min(d, sqr(pt.x + xi) + sqr(pt.y - yi));
-  d = min(d, sqr(pt.x - xi) + sqr(pt.y + yi));
-  d = min(d, sqr(pt.x + xi) + sqr(pt.y + yi));
+  const double X = sqr(rx);
+  const double Y = sqr(ry);
+
+  const double delta = sqr(X + Y + g.fe2) - 4 * g.fe2 * X;
+  const double A = (X + Y + g.fe2 - sqrt(delta)) / 2.0;
+  const double ah = sqrt(A);
+  const double bh2 = g.fe2 - A;
+  const double term = A * g.be2 + g.ae2 * bh2;
+  const double xi = ah * sqrt(g.ae2 * (g.be2 + bh2) / term);
+  const double yi = g.bb * sqrt(bh2 * (g.ae2 - A) / term);
+  double d = sqr(rx - xi) + sqr(ry - yi);
+  d = min(d, sqr(rx + xi) + sqr(ry - yi));
+  d = min(d, sqr(rx - xi) + sqr(ry + yi));
+  d = min(d, sqr(rx + xi) + sqr(ry + yi));
   return sqrt(d);
+}
+
+inline double Ellipse::distopoint(Pointd p) {
+#if defined(SBM_ELLIPSE_PROFILE)
+  ++sbmCounter("distopoint");
+#endif
+  return distFast(p.x, p.y);
 }
 
 
@@ -778,7 +827,7 @@ inline bool RectIter::isEnd() {
 }
 
 
-inline RectIter RectIter::operator ++ () {
+inline RectIter& RectIter::operator ++ () {
   doinc();
   return *this;
 }
@@ -900,7 +949,7 @@ inline bool EllipseIter::isEnd() {
   return isend;
 }
 
-inline EllipseIter EllipseIter::operator ++ () {
+inline EllipseIter& EllipseIter::operator ++ () {
   doinc();
   return *this;
 }
@@ -912,6 +961,9 @@ inline EllipseIter EllipseIter::operator ++ (int) {
 }
 
 inline void EllipseIter::doinc() {
+#if defined(SBM_ELLIPSE_PROFILE)
+  SBM_SUBPHASE(_ps_doinc, "doinc");
+#endif
   if (points.empty()) {
     if (dir == 1) {
       while (np.x < xmax && points.empty()) {
@@ -940,10 +992,16 @@ inline void EllipseIter::doinc() {
 }
 
 inline void EllipseIter::calcYAxis(int x) {
+#if defined(SBM_ELLIPSE_PROFILE)
+  SBM_SUBPHASE(_ps_calcYAxis, "calcYAxis_body");
+#endif
   double A = c;
   double B = (b * x + e);
   double C = f + d * x + a * x * x;
   double delta = B * B - 4 * A * C;
+#if defined(SBM_ELLIPSE_PROFILE)
+  sbmCounter("calcYAxis") += 1;
+#endif
   if (delta < 0) {
     return;
   }
@@ -958,14 +1016,20 @@ inline void EllipseIter::calcYAxis(int x) {
   int ymid = (int)floor((ya + yb) / 2.0);
   int yy = (int)y;
   for (int idy = yy + 1; dir == 1 || idy < ymid; ++idy) {
-    if (ell->distopoint(Pointd(1.0 * x, 1.0 * idy)) <= distance_tolerance) {
+    if (ell->distFast(1.0 * x, 1.0 * idy) <= distance_tolerance) {
+#if defined(SBM_ELLIPSE_PROFILE)
       points.push(Pointi(x, idy));
+    ++sbmCounter("push_outer");
+    ++sbmCounter("stack_push");
+#else
+      points.push(Pointi(x, idy));
+#endif
     } else {
       break;
     }
   }
   for (int idy = yy; dir == -1 || idy >= ymid; --idy) {
-    if (ell->distopoint(Pointd(1.0 * x, 1.0 * idy)) <= distance_tolerance) {
+    if (ell->distFast(1.0 * x, 1.0 * idy) <= distance_tolerance) {
       points.push(Pointi(x, idy));
     } else {
       break;
@@ -974,15 +1038,18 @@ inline void EllipseIter::calcYAxis(int x) {
   if ((dir == 1 && x == xmax) || (dir == -1 && x == xmin)) {
     for (int id = 1; id <= (int)ceil(distance_tolerance); ++id) {
       for (int idy = yy + 1; ; ++idy) {
-        if (ell->distopoint(Pointd(1.0 * (x + id * dir), 1.0 * idy)) <= distance_tolerance) {
+        if (ell->distFast(1.0 * (x + id * dir), 1.0 * idy) <= distance_tolerance) {
           points.push(Pointi(x + id * dir, idy));
+#if defined(SBM_ELLIPSE_PROFILE)
+          ++sbmCounter("push_endcap");
+#endif
         } else {
           break;
         }
       }
 
       for (int idy = yy; ; --idy) {
-        if (ell->distopoint(Pointd(1.0 * (x + id * dir), 1.0 * idy)) <= distance_tolerance) {
+        if (ell->distFast(1.0 * (x + id * dir), 1.0 * idy) <= distance_tolerance) {
           points.push(Pointi(x + id * dir, idy));
         } else {
           break;

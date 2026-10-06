@@ -12,7 +12,8 @@
 
 namespace zgh {
 
-bool calculateGradient3(const uint8_t *image, int row, int col, double * angles);
+bool calculateGradient3(const uint8_t *image, int row, int col, double * angles,
+                        int num_threads = 0);
 
 } // namespace zgh
 

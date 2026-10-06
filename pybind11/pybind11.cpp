@@ -189,7 +189,9 @@ PYBIND11_MODULE(shape_based_matching_py, m) {
         .def_readwrite("min_goodness", &zgh::DetectParams::min_goodness,
             "最终质量门槛, 默认 0.4")
         .def_readwrite("candidate_goodness", &zgh::DetectParams::candidate_goodness,
-            "候选粗筛门槛, 默认 0.3");
+            "候选粗筛门槛, 默认 0.3")
+        .def_readwrite("num_threads", &zgh::DetectParams::num_threads,
+            "并行线程数: 0=自动(用满可用核), 1=关闭多线程; 默认 0");
 
     // 输入: 灰度图(cv::Mat/np.uint8 二维数组, 3 通道 BGR 会自动转灰度) + EllipseParams。
     // 输出: list[dict], 按 goodness 降序:

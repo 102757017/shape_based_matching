@@ -215,6 +215,7 @@ typedef struct sbm_ellipse_params_t {
                                  * 调低可检出被遮挡更严重的椭圆, 但误检/拟合偏差会增多 */
     double min_goodness;        /* 最终质量门槛, <=0 -> 0.4, 同上 */
     double candidate_goodness;  /* 候选粗筛门槛, <=0 -> 0.3 */
+    int num_threads;            /* 并行线程数: 0/负数 = 自动(用满可用核), 1 = 关闭多线程 */
 } sbm_ellipse_params_t;
 
 /* 单个椭圆结果。

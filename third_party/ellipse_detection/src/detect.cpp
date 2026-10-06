@@ -19,13 +19,181 @@
 #include "unitily.h"
 #include "compute.h"
 #include "cvcannyapi.h"
+#include "parallel.hpp"
+
+#if defined(SBM_ELLIPSE_PROFILE)
+#include <chrono>
+#endif
 
 
 namespace zgh {
 
+// 计时脚手架(DetectStats / ScopedPhase / sbmCounter)见 profile.hpp
+
+static DetectStats g_stats;
+
+// 解析请求的线程数: 0/负数 -> 自动(用满硬件并发数); >=1 -> 取请求值。
+// 开启 SBM_ELLIPSE_PROFILE 时各阶段累加器没有加锁, 强制单线程,
+// 避免多线程累加互相踩踏(profile 本来只用于单线程调参)。
+static int resolveThreads(int requested) {
+#if defined(SBM_ELLIPSE_PROFILE)
+  (void)requested;
+  return 1;
+#else
+  return ThreadPool::resolveThreads(requested);
+#endif
+}
+
+DetectStats& detectStats() {
+  return g_stats;
+}
+
+long long& sbmCounter(const char* key) {
+#if defined(SBM_ELLIPSE_PROFILE)
+  static std::unordered_map<const char*, long long> ctr;
+  auto it = ctr.find(key);
+  if (it == ctr.end()) {
+    it = ctr.emplace(key, 0LL).first;
+  }
+  return it->second;
+#else
+  static long long dummy = 0;
+  return dummy;
+#endif
+}
+
+void resetSbmCounters() {
+#if defined(SBM_ELLIPSE_PROFILE)
+  static std::unordered_map<const char*, long long> ctr;
+  for (auto &kv : ctr) {
+    kv.second = 0;
+  }
+#endif
+}
+
+#if defined(SBM_ELLIPSE_PROFILE)
+namespace {
+inline double ms_since(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - t).count();
+}
+}  // namespace
+
+// 顶层阶段(dest != null): 记绝对时间轴 + 累加到 dest
+// 子阶段(dest == null):  按名聚合耗时与次数, 不进时间轴
+ScopedPhase::ScopedPhase(const char* name, double* dest)
+    : dest_(dest), t0_(std::chrono::steady_clock::now()) {
+  rec_id_ = -1;
+  if (dest_) {
+    if (g_stats.rec_count < (int)(sizeof(g_stats.rec) / sizeof(g_stats.rec[0]))) {
+      rec_id_ = g_stats.rec_count++;
+      g_stats.rec[rec_id_].name = name;
+      g_stats.rec[rec_id_].dest = dest_;
+      g_stats.rec[rec_id_].begin_ms = ms_since(g_stats.total_begin_ns);
+    }
+  } else {
+    sub_id_ = -1;
+    for (int i = 0; i < g_stats.sub_count; ++i) {
+      if (std::strcmp(g_stats.sub_names[i], name) == 0) { sub_id_ = i; break; }
+    }
+    if (sub_id_ < 0 && g_stats.sub_count < 12) {
+      sub_id_ = g_stats.sub_count++;
+      std::strncpy(g_stats.sub_names[sub_id_], name, 31);
+      g_stats.sub_names[sub_id_][31] = '\0';
+    }
+  }
+}
+
+ScopedPhase::~ScopedPhase() {
+  const double dur = ms_since(t0_);
+  if (dest_) {
+    *dest_ += dur;
+  }
+  if (rec_id_ >= 0) {
+    g_stats.rec[rec_id_].end_ms = ms_since(g_stats.total_begin_ns);
+  }
+  if (sub_id_ >= 0) {
+    g_stats.sub_ms[sub_id_] += dur;
+    ++g_stats.sub_n[sub_id_];
+  }
+}
+#else
+ScopedPhase::ScopedPhase(const char*, double*) {}
+ScopedPhase::~ScopedPhase() {}
+#endif
+
+void printDetectStats(const DetectStats& s) {
+  // 绝对时间轴: 确认各阶段串行无重叠
+  double prev_end = 0.0;
+  std::printf("  --- absolute timeline (ms from detectEllipse start) ---\n");
+  for (int i = 0; i < s.rec_count; ++i) {
+    const PhaseRecord &r = s.rec[i];
+    std::printf("    %-16s %8.2f -> %8.2f  (dur %6.2f, gap %5.2f)\n",
+                r.name, r.begin_ms, r.end_ms, r.end_ms - r.begin_ms,
+                r.begin_ms - prev_end);
+    prev_end = r.end_ms;
+  }
+
+#if defined(SBM_ELLIPSE_PROFILE)
+  {
+    const char* keys[] = {"distFast", "push_outer", "push_endcap", "calcYAxis", "stack_push"};
+    for (const char* k : keys) {
+      std::printf("    ctr:%-16s %lld\n", k, sbmCounter(k));
+    }
+  }
+#endif
+
+  for (int i = 0; i < s.sub_count; ++i) {
+    std::printf("    sub:%-16s %8.2f  (n=%lld, avg %.3f)\n", s.sub_names[i],
+                s.sub_ms[i], s.sub_n[i],
+                s.sub_n[i] ? s.sub_ms[i] / (double)s.sub_n[i] : 0.0);
+  }
+
+  const double phase_sum = s.gradient_ms + s.lsd_ms + s.arc_group_ms +
+      s.initial_ellipses_ms + s.clustering_ms + s.candidate_scan_ms +
+      s.refine_ms;
+  std::printf(
+      "  --- phase timing (ms, cumulative over all runs) ---\n"
+      "    [total anchor]    %8.2f\n"
+      "    gradient           %8.2f   (%.1f%%)\n"
+      "    lsd                %8.2f   (%.1f%%)\n"
+      "    arc grouping       %8.2f   (%.1f%%)\n"
+      "    initial ellipses   %8.2f   (%.1f%%)\n"
+      "    clustering         %8.2f   (%.1f%%)\n"
+      "    candidate scan     %8.2f   (%.1f%%)\n"
+      "    refine             %8.2f   (%.1f%%)\n"
+      "    sum(non-nested)    %8.2f   (%.1f%%)\n"
+      "  --- counts ---\n"
+      "    lines=%lld arcs=%lld initial_ellipses=%lld candidates=%lld "
+      "inliers=%lld iter_pixels=%lld\n",
+      s.total_ms,
+      s.gradient_ms, 100.0 * s.gradient_ms / s.total_ms,
+      s.lsd_ms, 100.0 * s.lsd_ms / s.total_ms,
+      s.arc_group_ms, 100.0 * s.arc_group_ms / s.total_ms,
+      s.initial_ellipses_ms, 100.0 * s.initial_ellipses_ms / s.total_ms,
+      s.clustering_ms, 100.0 * s.clustering_ms / s.total_ms,
+      s.candidate_scan_ms, 100.0 * s.candidate_scan_ms / s.total_ms,
+      s.refine_ms, 100.0 * s.refine_ms / s.total_ms,
+      phase_sum, 100.0 * phase_sum / s.total_ms,
+      s.line_count, s.arc_count, s.initial_ellipse_count, s.candidate_count,
+      s.inlier_count, s.iter_pixels);
+}
+
 bool lsdgroups(const double *image, int row, int col, double scale, std::vector<std::shared_ptr<Arc> >& arcs) {
+#if defined(SBM_ELLIPSE_PROFILE)
+  auto t_lsd0 = std::chrono::steady_clock::now();
+  auto ms_since = [](const std::chrono::steady_clock::time_point &t) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t).count();
+  };
+#endif
   std::vector<std::shared_ptr<Lined> > lines;
   lineSegmentDetection(image, row, col, lines);
+#if defined(SBM_ELLIPSE_PROFILE)
+  g_stats.lsd_ms += ms_since(t_lsd0);
+  g_stats.line_count = (long long)lines.size();
+  auto t_arc0 = std::chrono::steady_clock::now();
+#endif
 
   int *pixlabel = new int[row * col];
   bool *used = new bool[(int)lines.size()];
@@ -172,6 +340,10 @@ bool lsdgroups(const double *image, int row, int col, double scale, std::vector<
 
   delete [] pixlabel;
   delete [] used;
+#if defined(SBM_ELLIPSE_PROFILE)
+  g_stats.arc_group_ms += ms_since(t_arc0);
+  g_stats.arc_count = (long long)arcs.size();
+#endif
   return true;
 }
 
@@ -179,16 +351,19 @@ bool getValidInitialEllipseSet(const uint8_t *image,
                                const double *angles,
                                int row, int col,
                                std::vector<std::shared_ptr<Ellipse> > &ells,
-                               int polarity) {
+                               int polarity,
+                               int num_threads) {
 
   double scale = 0.8;
   double sigma_scale = 0.6;
   int scale_row = (int)ceil(1.0 * row * scale);
   int scale_col = (int)ceil(1.0 * col * scale);
   double *scale_data = new double[scale_row * scale_col];
-  gaussianSampler(image, row, col, scale_data, scale_row, scale_col, scale, sigma_scale);
+  gaussianSampler(image, row, col, scale_data, scale_row, scale_col, scale, sigma_scale,
+                  num_threads);
   std::vector<std::shared_ptr<Arc> > arcs;
 
+  ScopedPhase _ph_init("initial_ellipses", &g_stats.initial_ellipses_ms);
   lsdgroups(scale_data, scale_row, scale_col, scale, arcs);
   delete [] scale_data;
 
@@ -197,6 +372,7 @@ bool getValidInitialEllipseSet(const uint8_t *image,
   for (int id = 0; id < groupsNum; ++id) {
     if (polarity == 0 || arcs[id]->polarity == polarity) {
       if (arcs[id]->coverages >= 4.0 * PI / 9.0) {
+        SBM_SUBPHASE(_ps_singlefit, "fit(arc_single)");
         auto ell = calcElliseParam(arcs[id], nullptr, angles, row, col);
         if (ell) {
           ells.push_back(std::move(ell));
@@ -205,20 +381,39 @@ bool getValidInitialEllipseSet(const uint8_t *image,
     }
   }
 
-  for (int i = 0; i < groupsNum - 1; ++i) {
+  // 弧段两两拟合。每个 (i, j) 组合只读 arcs/angles -> 相互独立, 可并行。
+  // 结果先落到 per_i[i], 再按 i 升序合并, 保证与串行的 ells 顺序完全一致
+  // (下游聚类依赖该顺序, 顺序变了结果就会漂)。
+  const int nt = resolveThreads(num_threads);
+  std::vector<std::vector<std::shared_ptr<Ellipse> > > per_i(
+      groupsNum > 0 ? groupsNum : 1);
+  ThreadPool::instance().parallelFor(
+      groupsNum - 1, [&](int i) {
+    auto &out_i = per_i[i];
     for (int j = i + 1; j < groupsNum; ++j) {
       if ((arcs[i]->polarity == polarity || polarity == NONE_POL) &&
           (arcs[j]->polarity == polarity || polarity == NONE_POL) &&
           (int)arcs[i]->lines.size() + (int)arcs[j]->lines.size() >= 3 &&
           arcs[i]->coverages + arcs[j]->coverages >= 3.0 * PI / 9.0
           ) {
+#if defined(SBM_ELLIPSE_PROFILE)
+        SBM_SUBPHASE(_ps_region, "region_limitation");
+#endif
         if (regionLimitation(arcs[i], arcs[j])) {
+#if defined(SBM_ELLIPSE_PROFILE)
+          SBM_SUBPHASE(_ps_pairfit, "fit(arc_pair)");
+#endif
           auto ell = calcElliseParam(arcs[i], arcs[j], angles, row, col);
           if (ell) {
-            ells.push_back(std::move(ell));
+            out_i.push_back(std::move(ell));
           }
         }
       }
+    }
+  }, nt);
+  for (int i = 0; i < groupsNum; ++i) {
+    for (auto &e : per_i[i]) {
+      ells.push_back(std::move(e));
     }
   }
   return true;
@@ -464,11 +659,12 @@ static bool cluster1DDatas(const std::vector<std::shared_ptr<Ellipse> > &ells,
 
 bool generateEllipseCandidates(const uint8_t *image, const double *angles,
                                int row, int col,
-                               std::vector<std::shared_ptr<Ellipse> > &ells, int polarity) {
+                               std::vector<std::shared_ptr<Ellipse> > &ells, int polarity,
+                               int num_threads) {
 
   std::vector<std::shared_ptr<Ellipse> > ells_init;
 
-  getValidInitialEllipseSet(image, angles, row, col, ells_init, polarity);
+  getValidInitialEllipseSet(image, angles, row, col, ells_init, polarity, num_threads);
 
   int init_size = (int)ells_init.size();
   if (init_size == 0) {
@@ -476,8 +672,13 @@ bool generateEllipseCandidates(const uint8_t *image, const double *angles,
   }
 
 
+#if defined(SBM_ELLIPSE_PROFILE)
+  g_stats.initial_ellipse_count = (long long)ells_init.size();
+#endif
+
   // 最外层椭圆中心聚类　第二层椭圆 phi　聚类　第三层椭圆长短轴聚类
 
+  ScopedPhase _ph_clu("clustering", &g_stats.clustering_ms);
   std::vector<Pointd> cluster_center;
   cluster2DPoints(ells_init, cluster_center, MIN_ELLIPSE_THRESHOLD_LENGTH, 0);
 
@@ -624,6 +825,10 @@ static bool subdetect(double *angles, int row, int col, double min_cover_angle,
                       double distance_tolerance, double normal_tolerance, double tr,
                       std::vector<std::shared_ptr<Ellipse> > &ells) {
 
+#if defined(SBM_ELLIPSE_PROFILE)
+  g_stats.candidate_count = (long long)ells.size();
+#endif
+
   std::vector<std::shared_ptr<Ellipse> > ells_out;
   for (int id = 0; id < (int)ells.size(); ++id) {
     auto &ell = ells[id];
@@ -650,7 +855,11 @@ static bool subdetect(double *angles, int row, int col, double min_cover_angle,
     }
     ell->inliers.clear();
     ell->inliers = std::move(inliers_t);
-    std::shared_ptr<Ellipse> ell_t = fitEllipse(ell->inliers);
+    std::shared_ptr<Ellipse> ell_t;
+    {
+      SBM_SUBPHASE(_ps_fit1, "fit(inliers)");
+      ell_t = fitEllipse(ell->inliers);
+    }
     if (ell_t) {
       ell_t->polarity = ell->polarity;
       if (ell_t->equal(ell, 3 * distance_tolerance, 0.1, 0.1, 0.1, 0.9)) {
@@ -677,9 +886,17 @@ static bool subdetect(double *angles, int row, int col, double min_cover_angle,
             }
           }
         }
-        int bin_count = improveInliers(new_inliers, ell_t->o, tbins);
+        int bin_count = 0;
+        {
+          SBM_SUBPHASE(_ps_improve2, "ell_improve2");
+          bin_count = improveInliers(new_inliers, ell_t->o, tbins);
+        }
         if ((int)new_inliers.size() - (int)ell->inliers.size() >= -10) {
-          std::shared_ptr<Ellipse> ell_tt = fitEllipse(new_inliers);
+          std::shared_ptr<Ellipse> ell_tt;
+          {
+            SBM_SUBPHASE(_ps_fit2, "fit(new_inliers)");
+            ell_tt = fitEllipse(new_inliers);
+          }
           if (ell_tt) {
             ell_tt->polarity = ell_t->polarity;
             ell_tt->inliers = std::move(new_inliers);
@@ -745,33 +962,58 @@ bool detectEllipse(const uint8_t *image, int row, int col,
 bool detectEllipse(const uint8_t *image, int row, int col,
                    std::vector<std::shared_ptr<Ellipse> > &ells, const DetectParams &params) {
 
+#if defined(SBM_ELLIPSE_PROFILE)
+  g_stats.reset();
+  resetSbmCounters();
+  g_stats.total_begin_ns = std::chrono::steady_clock::now();
+#endif
+
   // calc the gradient
   double *angles = new double[row * col];
 
-  calculateGradient3(image, row, col, angles);
+#if defined(SBM_ELLIPSE_PROFILE)
+  {
+    ScopedPhase _ph_grad("gradient", &g_stats.gradient_ms);
+#endif
+    calculateGradient3(image, row, col, angles, params.num_threads);
+#if defined(SBM_ELLIPSE_PROFILE)
+  }
+#endif
 
-  generateEllipseCandidates(image, angles, row, col, ells, params.polarity);
+  generateEllipseCandidates(image, angles, row, col, ells, params.polarity,
+                            params.num_threads);
 
 
 
+  ScopedPhase _ph_scan("candidate_scan", &g_stats.candidate_scan_ms);
   // control parameter
   double tr = 0.6;
   double distance_tolerance = MIN_ELLIPSE_THRESHOLD_LENGTH;
   double normal_tolerance = cos(PI / 12.0);
 
+  // 每个候选只是读 angles 并把结果写进自己这个 Ellipse 对象 -> 相互独立。
+  // 结果按"候选原索引"回填 kept[], 最后按索引升序取出, 顺序与串行完全一致
+  // (下游 std::sort 不是稳定排序, 顺序一变结果就可能漂)。
+  const int nt = resolveThreads(params.num_threads);
+  const int n_ells = (int)ells.size();
+  std::vector<std::shared_ptr<Ellipse> > kept(n_ells, nullptr);
 
-
-  std::vector<Pixel> inliers_positive, inliers_negative, inliers_all;
-  std::vector<std::shared_ptr<Ellipse> > ells_temp;
-  for (auto &ell : ells) {
-    ell->inliers.clear();
-    inliers_positive.clear();
-    inliers_negative.clear();
-    inliers_all.clear();
+  ThreadPool::instance().parallelFor(
+      n_ells, [&](int idx) {
+    auto &ell = ells[idx];
+    // 这几个容器原来在循环外复用; 并行下必须每个候选一份
+    std::vector<Pixel> inliers_positive, inliers_negative, inliers_all;
     double beta = PI * (1.5 * (ell->a + ell->b) - sqrt(ell->a * ell->b));
     int tbins = min(180, (int)floor(beta * tr));
 
+#if defined(SBM_ELLIPSE_PROFILE)
+    SBM_SUBPHASE(_ps_iter, "ell_iter_scan");
+#endif
     for (EllipseIter iter(ell, distance_tolerance); !iter.isEnd(); ++iter) {
+#if defined(SBM_ELLIPSE_PROFILE)
+      ++g_stats.iter_pixels;
+      SBM_SUBPHASE(_ps_body, "iter_body");
+#endif
       if (inRect(row, col, iter.np.x, iter.np.y)) {
         int addr = iter.np.x * col + iter.np.y;
         if (!equal(angles[addr], ANGLE_NOT_DEF)) {
@@ -802,17 +1044,34 @@ bool detectEllipse(const uint8_t *image, int row, int col,
       ell->inliers.clear();
       ell->inliers = std::move(inliers_all);
     }
+    // 原来是 continue; lambda 体内没有可 continue 的外层循环
     if (params.polarity != NONE_POL && ell->polarity != params.polarity) {
-      continue;
+      return;
     }
 
-    int bin_count = improveInliers(ell->inliers, ell->o, tbins);
+    int bin_count = 0;
+    {
+#if defined(SBM_ELLIPSE_PROFILE)
+      SBM_SUBPHASE(_ps_improve, "ell_improve");
+#endif
+      bin_count = improveInliers(ell->inliers, ell->o, tbins);
+    }
     double support_inliers_ratio = 1.0 * ell->inliers.size() / distance_tolerance / beta;
     double completeness_ratio = 1.0 * bin_count / tbins;
     ell->coverangle = completeness_ratio * 360.0;
     ell->goodness = sqrt(support_inliers_ratio * completeness_ratio);
+#if defined(SBM_ELLIPSE_PROFILE)
+    g_stats.inlier_count += (long long)ell->inliers.size();
+#endif
     if (ell->goodness >= params.candidate_goodness) {
-      ells_temp.push_back(ell);
+      kept[idx] = ell;
+    }
+  }, nt);
+
+  std::vector<std::shared_ptr<Ellipse> > ells_temp;
+  for (int idx = 0; idx < n_ells; ++idx) {
+    if (kept[idx]) {
+      ells_temp.push_back(kept[idx]);
     }
   }
   ells.clear();
@@ -824,12 +1083,16 @@ bool detectEllipse(const uint8_t *image, int row, int col,
 
 
 
+  ScopedPhase _ph_ref("refine", &g_stats.refine_ms);
   subdetect(angles, row, col, params.min_cover_angle, params.min_goodness,
             params.line_width, normal_tolerance, tr, ells);
 
 
 
   delete [] angles;
+#if defined(SBM_ELLIPSE_PROFILE)
+  g_stats.total_ms += ms_since(g_stats.total_begin_ns);
+#endif
   return true;
 }
 

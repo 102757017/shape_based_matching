@@ -25,7 +25,7 @@ bool regionLimitation(const std::shared_ptr<Arc> &arc1, const std::shared_ptr<Ar
 
 bool gaussianSampler(const uint8_t *ori_data, int ori_row, int ori_col,
                      double *data, int row, int col,
-                     double scale, double sigma_scale);
+                     double scale, double sigma_scale, int num_threads = 0);
 
 std::shared_ptr<Ellipse> fitEllipse(const std::vector<Pixel> &points);
 

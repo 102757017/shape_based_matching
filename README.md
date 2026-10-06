@@ -137,6 +137,52 @@ zgh::detectEllipse(gray.data, gray.rows, gray.cols, ells, params);
 
 NOTE coordinate convention: `Ellipse::o.x` is the **row** and `o.y` is the **col**; `phi` is measured in the (row, col) plane. When drawing with `cv::ellipse`, use center `(o.y, o.x)`, axes `(a, b)` and angle `90° - phi`. `ellipse_debug.exe` dumps per-stage intermediates (gradient, arcs, candidates) for troubleshooting.
 
+### Performance
+
+`ellipse_bench.exe <image> [--iters N] [--runs M] [--micro K]` measures throughput and prints a result signature so you can verify that optimizations did not change the output.
+
+The dominant cost used to be the per-point ellipse scan (`EllipseIter`), which was ~70% of total time. Two fixes in `types.hpp` (both behavior-preserving — every detected ellipse is bit-identical):
+
+1. **`EllipseIter::operator++()` returned `EllipseIter` by value.** Every `++iter` therefore deep-copied the internal `std::stack<Pixel>`, which holds an entire column of candidate pixels. The prefix increment now returns `EllipseIter&` (same for `RectIter`). Iterator step went 401 ns -> 57 ns (7x).
+2. **`Ellipse::distopoint()` recomputed `cos/sin(phi)`, `a*a`, `b*b` on every call.** These are now cached in `Ellipse::FastGeom` and refreshed only when the ellipse changes (`Ellipse::distFast(x, y)`).
+
+Measured on `build/Release/ellipse_bench.exe` (MSVC Release, profile macros OFF):
+
+| image | before | after | speedup |
+|---|---|---|---|
+| test5.jpg 473x291 | 90.3 ms | 33.5 ms | 2.7x |
+| test1.jpg 309x236 | 33.4 ms | 12.9 ms | 2.6x |
+| synth_ellipse.bmp 640x480 | 35.2 ms | 24.2 ms | 1.5x |
+
+### Multithreading
+
+`DetectParams::num_threads` (0 = auto / all cores, 1 = off) controls it; exposed as `EllipseParams.num_threads` in Python, `sbm_ellipse_params_t.num_threads` in the C ABI and `EllipseParams.NumThreads` in C#.
+
+Parallelized (all read-only on the shared gradient field, so results are bit-identical to serial):
+
+- `gaussianSampler` — the two convolution passes, per column / per row
+- `calculateGradient3` — the per-row `atan2` angle loop
+- `getValidInitialEllipseSet` — the arc-pair fitting loop (outer `i`)
+- the candidate scoring loop in `detectEllipse`
+
+`subdetect` (the refine stage) **must stay serial**: an accepted ellipse writes `angles[addr] = ANGLE_NOT_DEF`, i.e. it consumes its own support pixels, so later candidates see a different gradient field. LSD region-growing is likewise serial. Those two are the remaining ~30%.
+
+Threading uses a ~100-line `ThreadPool` in `include/parallel.hpp`, **not OpenMP**. On MSVC the default OpenMP wait policy makes worker threads spin for milliseconds after each parallel region; with only two regions per frame that ate the entire gain (4 threads came out *slower* than 1 thread) unless `OMP_WAIT_POLICY=passive` was set — which a third-party caller cannot be expected to do. The pool's workers sleep on a condition variable instead, and it adds no `vcomp140.dll` dependency to the shipped binaries.
+
+Measured on `ellipse_bench.exe` (8 logical cores), same images as above, medians:
+
+| image | 1 thread | auto (8) | speedup from threading |
+|---|---|---|---|
+| test5.jpg 473x291 | 34.0 ms | 20.6 ms | 1.65x |
+| test1.jpg 309x236 | 13.4 ms | 10.0 ms | 1.35x |
+| synth_ellipse.bmp 640x480 | 25.1 ms | 17.9 ms | 1.40x |
+
+Combined with the scan fixes above, total is **90 ms -> ~20 ms (4.4x)** for test5. Output is deterministic: the result signature is identical for every thread count (verified).
+
+Caveat if you call `detectEllipse` from your own multiple threads: parallel regions are serialized by an internal dispatch lock, so they queue rather than oversubscribe. Do not call it from inside a `parallelFor` body.
+
+Remaining hotspots: LSD region-growing (~15%) and `subdetect` (~8%), both inherently sequential, and the 6x6 generalized eigen-solve in `fitEllipse` (~100 calls/image). Halíř–Flusser would turn the last one into a 3x3 standard eigenproblem, but it changes the numerics and therefore the detected ellipses, so it was left alone.
+
 ### Python binding
 
 ```python

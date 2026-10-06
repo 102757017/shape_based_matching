@@ -18,6 +18,7 @@
 
 #include "cvcannyapi.h"
 #include "defines.h"
+#include "parallel.hpp"
 
 // OpenCV 4 移除了旧 C API 头(imgproc/types_c.h 不再被默认包含),
 // 这里沿用旧版定义: L2 梯度标志占用符号位, 由后面的 &= INT_MAX 清掉
@@ -310,7 +311,8 @@ static void Canny3(cv::InputArray image, cv::OutputArray _edges, cv::OutputArray
 }
 
 
-bool calculateGradient3(const uint8_t* data, int row, int col, double* angles) {
+bool calculateGradient3(const uint8_t* data, int row, int col, double* angles,
+                      int num_threads) {
   cv::Mat1b edge;
   cv::Mat1s DX, DY;
   cv::Mat1b gray = cv::Mat::zeros(row, col, CV_8UC1);
@@ -321,7 +323,10 @@ bool calculateGradient3(const uint8_t* data, int row, int col, double* angles) {
   // canny
   Canny3(gray, edge, DX, DY, 3, false);
 
-  for (int idx = 0; idx < row; ++idx) {
+  // 逐行计算梯度角: 行与行之间完全独立(各自只写自己那一行的 angles),
+  // 这里按行并行。atan2 比较慢, 这块在整帧里占约 7%。
+  zgh::ThreadPool::instance().parallelFor(
+      row, [&](int idx) {
     short* _dx = DX.ptr<short>(idx);
     short* _dy = DY.ptr<short>(idx);
     uchar* _e = edge.ptr<uchar>(idx);
@@ -333,7 +338,7 @@ bool calculateGradient3(const uint8_t* data, int row, int col, double* angles) {
         angles[idx * col + idy] = ANGLE_NOT_DEF;
       }
     }
-  }
+  }, num_threads);
 
   return true;
 }

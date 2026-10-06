@@ -445,6 +445,8 @@ zgh::DetectParams ellipse_params_from_c(const sbm_ellipse_params_t* p) {
     if (p->min_cover_angle > 0.0) out.min_cover_angle = p->min_cover_angle;
     if (p->min_goodness > 0.0) out.min_goodness = p->min_goodness;
     if (p->candidate_goodness > 0.0) out.candidate_goodness = p->candidate_goodness;
+    // num_threads: 0/负数=自动, >=1 用请求值
+    if (p->num_threads > 0) out.num_threads = p->num_threads;
     return out;
 }
 }  // namespace
@@ -457,6 +459,7 @@ SBM_API void sbm_ellipse_params_init(sbm_ellipse_params_t* params) {
     params->min_cover_angle = 240.0;
     params->min_goodness = 0.4;
     params->candidate_goodness = 0.3;
+    params->num_threads = 0;   /* 0 = 自动(用满可用核) */
 }
 
 SBM_API int sbm_detect_ellipses(const sbm_image_t* image,
