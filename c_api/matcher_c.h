@@ -240,6 +240,58 @@ SBM_API int sbm_detect_ellipses(const sbm_image_t* image,
                                 sbm_ellipse_t* out_ellipses,
                                 int max_ellipses);
 
+/* ============================ AAMED 椭圆检测 ============================
+ * 集成自 AAMED (BSD-2-Clause, 见 third_party/aamed/LICENSE), 与上面那一路走
+ * 的是完全不同的算法路线 (弧邻接矩阵 / 弧段分组 vs. 弧段梯度方向投票)。
+ *
+ * 与 sbm_detect_ellipses 的取舍:
+ *   - 擅长: 细长弧、局部残缺、边缘对比度低的椭圆; 对错位/遮挡容忍度更高。
+ *   - 代价: 内存占用按 rows*cols*272 Byte 量级预分配 (1080p 约 550 MB),
+ *     所以要么显式 create 一个长期复用的检测器, 要么走一次性接口(内部缓存)。
+ *   - 结果口径与 sbm_detect_ellipses 完全一致: 都是 sbm_ellipse_t, 可以
+ *     混用、共用同一套后处理。coverangle 恒为 0 (AAMED 不产出该量),
+ *     比较质量请用 goodness。
+ *
+ * 建议: 连续处理同一尺寸的多张图 -> 用 sbm_aamed_create / sbm_aamed_detect;
+ *       偶尔调一次 -> 用 sbm_detect_ellipses_aamed。
+ */
+typedef struct sbm_aamed_params_t {
+    double theta_fsa;       /* 邻域分组(FSA)角度约束, 弧度。<=0 -> CV_PI/3 (60°) */
+    double length_fsa;      /* 邻域分组(FSA)长度约束。<=0 -> 3.4 */
+    double t_val;           /* 验证阶段评分门槛 (0~1)。<=0 -> 0.77 */
+    double min_goodness;    /* 输出评分门槛: goodness 低于它的丢掉, <=0 -> 不筛 */
+    double nms_iou;         /* 非极大抑制的重叠(IoU)门槛, <=0 -> 0.7 (上游默认)。
+                               仅当 SELECT_CLUSTER_METHOD==OUR_CLUSTER_METHOD 时生效:
+                               IoU>该值则低分者被抑制; 调大更宽松、调小更严格。 */
+} sbm_aamed_params_t;
+
+/* 填一份默认参数 (theta_fsa=PI/3, length_fsa=3.4, t_val=0.77, 不筛, nms=0.7) */
+SBM_API void sbm_aamed_params_init(sbm_aamed_params_t* params);
+
+/* 创建 AAMED 检测器。rows/cols 是"预计处理的图像尺寸上限", 实际按各次
+ * sbm_aamed_detect 传入的图像取大值自动扩容, 所以先给个够用的估值即可。
+ * 会立刻按 rows*cols 量级分配内存; 失败返回 NULL, 详情用 sbm_last_error 取。 */
+SBM_API void* sbm_aamed_create(int rows, int cols);
+
+/* 销毁检测器 (句柄可为 NULL, 无操作) */
+SBM_API void  sbm_aamed_destroy(void* handle);
+
+/* 用指定检测器在灰度/3通道图上检测椭圆。
+ * 返回写入 out_ellipses 的结果个数 (>=0, 按 goodness 降序), 负数为错误码;
+ * 详情用 sbm_last_error(handle) 取。h 为 NULL 时返回负错误码。 */
+SBM_API int   sbm_aamed_detect(void* handle,
+                               const sbm_image_t* image,
+                               const sbm_aamed_params_t* params,  /* NULL = 全默认 */
+                               sbm_ellipse_t* out_ellipses,
+                               int max_ellipses);
+
+/* 一次性调用 (无句柄)。内部按线程缓存检测器并按需扩容, 同一尺寸反复调用
+ * 不会重复分配; 多线程下每个线程各持一份缓存。 */
+SBM_API int   sbm_detect_ellipses_aamed(const sbm_image_t* image,
+                                        const sbm_aamed_params_t* params,  /* NULL = 全默认 */
+                                        sbm_ellipse_t* out_ellipses,
+                                        int max_ellipses);
+
 /* ============================ 错误 ============================ */
 SBM_API const char* sbm_last_error(void* handle);
 

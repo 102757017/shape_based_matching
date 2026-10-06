@@ -668,6 +668,26 @@ namespace ShapeBasedMatching
         [DllImport(Dll, EntryPoint = "sbm_detect_ellipses", CallingConvention = Call)]
         internal static extern int sbm_detect_ellipses(ref RawImage image, ref EllipseParams p,
             [In, Out] Ellipse[] outEllipses, int maxEllipses);
+
+        // ---------- AAMED (弧邻接矩阵) 椭圆检测 ----------
+        [DllImport(Dll, CallingConvention = Call)]
+        internal static extern void sbm_aamed_params_init(ref AamedParams p);
+
+        [DllImport(Dll, CallingConvention = Call)]
+        internal static extern IntPtr sbm_aamed_create(int rows, int cols);
+
+        [DllImport(Dll, CallingConvention = Call)]
+        internal static extern void sbm_aamed_destroy(IntPtr h);
+
+        // 用已有检测器检测
+        [DllImport(Dll, CallingConvention = Call)]
+        internal static extern int sbm_aamed_detect(IntPtr h, ref RawImage image,
+            ref AamedParams p, [In, Out] Ellipse[] outEllipses, int maxEllipses);
+
+        // 一次性调用 (内部按线程缓存检测器)
+        [DllImport(Dll, EntryPoint = "sbm_detect_ellipses_aamed", CallingConvention = Call)]
+        internal static extern int sbm_detect_ellipses_aamed(ref RawImage image, ref AamedParams p,
+            [In, Out] Ellipse[] outEllipses, int maxEllipses);
     }
 
     // ============================ 椭圆检测 ============================
@@ -746,6 +766,175 @@ namespace ShapeBasedMatching
         /// <summary>byte[] 便捷重载: grayData 为行优先连续内存, stride 传 0 表示 width(无填充)。</summary>
         public static Ellipse[] Detect(byte[] grayData, int width, int height,
                                        int stride, EllipseParams p)
+        {
+            if (grayData == null) throw new ArgumentNullException("grayData");
+            GCHandle pinned = GCHandle.Alloc(grayData, GCHandleType.Pinned);
+            try
+            {
+                RawImage img = new RawImage();
+                img.Data = pinned.AddrOfPinnedObject();
+                img.Width = width;
+                img.Height = height;
+                img.Channels = 1;
+                img.Step = stride;
+                return Detect(img, p);
+            }
+            finally
+            {
+                pinned.Free();
+            }
+        }
+    }
+
+    // ============================ AAMED 椭圆检测 ============================
+    // 这一路与上面的 EllipseDetector 算法不同 (弧邻接矩阵 vs. 梯度方向投票):
+    // 擅长细长弧 / 局部残缺 / 低对比度边缘, 但内部按 宽*高 预分配内存
+    // (约 272 Byte/像素), 所以有状态的 AamedDetector 才是反复用图时的正解。
+
+    /// <summary>AAMED 检测参数 (对应 sbm_aamed_params_t)。
+    /// 前三个与上游 FLED::SetParameters(theta_fsa, length_fsa, T_val) 对应,
+    /// 其中 ThetaFsa 是弧度(不是度), 本结构体不做任何单位换算, 原样透传给原生侧。
+    /// 后两个 (MinGoodness / NmsIou) 是本项目加的筛子。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct AamedParams
+    {
+        /// <summary>邻域分组角度约束, 弧度(不是度)。默认 π/3 ≈ 1.0472 (即 60°),
+        /// 由 sbm_aamed_params_init 写入, 与 C++ 侧一致。
+        /// 调大更宽松、更容易成组但误检增多; 调小更严。</summary>
+        public double ThetaFsa;
+        /// <summary>邻域分组长度约束。默认 3.4</summary>
+        public double LengthFsa;
+        /// <summary>验证阶段评分门槛 (0~1)。默认 0.77, 调低能检出更残缺的椭圆</summary>
+        public double TVal;
+        /// <summary>最终输出评分门槛: Goodness 低于它的丢掉。0 表示不筛, 默认 0</summary>
+        public double MinGoodness;
+        /// <summary>非极大抑制重叠 (IoU) 门槛。0 表示沿用上游默认 0.7。
+        /// 语义: 两椭圆 IoU 大于该值时低分者被抑制, 所以调大=更宽松(保留更多贴近的椭圆),
+        /// 调小=更严格。需本项目把 SELECT_CLUSTER_METHOD 设为 OUR_CLUSTER_METHOD
+        /// (基于 IoU 的 NMS) 才会生效, 默认的 PRASAD 几何聚类不吃这个参数。</summary>
+        public double NmsIou;
+
+        /// <summary>一份与 C++ 侧一致的默认参数 (60°, 3.4, 0.77, 不筛, IoU 0.7)</summary>
+        public static AamedParams Default()
+        {
+            AamedParams p = new AamedParams();
+            Native.sbm_aamed_params_init(ref p);
+            return p;
+        }
+    }
+
+    /// <summary>AAMED 检测器 (有状态, 可复用)。
+    /// 内部会按 宽*高 量级预分配内存 (1080p 约 550 MB), 所以成批处理同一尺寸
+    /// 图像时应长期持有同一个实例并 Dispose 掉, 不要每帧 new。</summary>
+    public sealed class AamedDetector : IDisposable
+    {
+        private IntPtr _handle = IntPtr.Zero;
+        private bool _disposed;
+
+        /// <summary>创建检测器。rows/cols 是预计处理的图像尺寸上限
+        /// (实际按各次 Detect 的图像自动扩容, 传 0 表示等第一次 Detect 再分配)。
+        /// 创建失败会抛异常, 详情看 LastError。</summary>
+        public AamedDetector(int rows = 0, int cols = 0)
+        {
+            _handle = Native.sbm_aamed_create(rows, cols);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException("sbm_aamed_create 失败: " +
+                    Utf8.PtrToString(Native.sbm_last_error(IntPtr.Zero)));
+        }
+
+        /// <summary>最近一次错误 (UTF-8, 无错误时为 null)</summary>
+        public string LastError
+        {
+            get { return Utf8.PtrToString(Native.sbm_last_error(_handle)); }
+        }
+
+        /// <summary>在灰度 / 3 通道图像中检测椭圆, 返回按 Goodness 降序排列的结果。
+        /// 结果口径与 EllipseDetector.Detect 完全一致 (CenterX=列, CenterY=行,
+        /// Phi 为相对列轴弧度), 两套结果可以混用。</summary>
+        public Ellipse[] Detect(RawImage image, AamedParams p)
+        {
+            if (_handle == IntPtr.Zero) throw new ObjectDisposedException("AamedDetector");
+            if (image.Data == IntPtr.Zero) throw new ArgumentException("RawImage.Data 为空");
+
+            int cap = 64;
+            while (true)
+            {
+                Ellipse[] buf = new Ellipse[cap];
+                int n = Native.sbm_aamed_detect(_handle, ref image, ref p, buf, cap);
+                if (n < 0)
+                    throw new InvalidOperationException("sbm_aamed_detect failed: " +
+                        LastError);
+                if (n <= cap)
+                {
+                    if (n == cap) return buf;
+                    Array.Resize(ref buf, n);
+                    return buf;
+                }
+                cap = n;   // 检出数超过缓冲, 扩容重试
+            }
+        }
+
+        /// <summary>byte[] 便捷重载: grayData 为行优先连续内存, stride 传 0 表示 width。</summary>
+        public Ellipse[] Detect(byte[] grayData, int width, int height, int stride, AamedParams p)
+        {
+            if (grayData == null) throw new ArgumentNullException("grayData");
+            GCHandle pinned = GCHandle.Alloc(grayData, GCHandleType.Pinned);
+            try
+            {
+                RawImage img = new RawImage();
+                img.Data = pinned.AddrOfPinnedObject();
+                img.Width = width;
+                img.Height = height;
+                img.Channels = 1;
+                img.Step = stride;
+                return Detect(img, p);
+            }
+            finally
+            {
+                pinned.Free();
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (_handle != IntPtr.Zero)
+            {
+                Native.sbm_aamed_destroy(_handle);
+                _handle = IntPtr.Zero;
+            }
+        }
+    }
+
+    /// <summary>AAMED 椭圆检测的静态便利入口 (内部按线程缓存检测器)。
+    /// 偶尔调一次用这个; 成批同尺寸图像请改用 AamedDetector 显式持有。</summary>
+    public static class AamedEllipseDetector
+    {
+        /// <summary>在灰度 / 3 通道图像中检测椭圆, 返回按 Goodness 降序排列的结果。</summary>
+        public static Ellipse[] Detect(RawImage image, AamedParams p)
+        {
+            int cap = 64;
+            while (true)
+            {
+                Ellipse[] buf = new Ellipse[cap];
+                int n = Native.sbm_detect_ellipses_aamed(ref image, ref p, buf, cap);
+                if (n < 0)
+                    throw new InvalidOperationException("sbm_detect_ellipses_aamed failed: " +
+                        Utf8.PtrToString(Native.sbm_last_error(IntPtr.Zero)));
+                if (n <= cap)
+                {
+                    if (n == cap) return buf;
+                    Array.Resize(ref buf, n);
+                    return buf;
+                }
+                cap = n;
+            }
+        }
+
+        /// <summary>byte[] 便捷重载: grayData 为行优先连续内存, stride 传 0 表示 width。</summary>
+        public static Ellipse[] Detect(byte[] grayData, int width, int height,
+                                       int stride, AamedParams p)
         {
             if (grayData == null) throw new ArgumentNullException("grayData");
             GCHandle pinned = GCHandle.Alloc(grayData, GCHandleType.Pinned);

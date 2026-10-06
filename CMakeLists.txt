@@ -218,6 +218,34 @@ if(USE_ELLIPSE_DETECTION)
     endif()
 endif()
 
+# ============ 椭圆算法横向对比基准 (需要两路都编译) ============
+# 交错计时 + 合成真值 IoU, 用于回答"这两套椭圆检测到底谁快/谁准"。
+option(ELLIPSE_COMPARE "Build ellipse_compare (standard vs AAMED)" ON)
+if(ELLIPSE_COMPARE AND USE_ELLIPSE_DETECTION AND USE_AAMED)
+    add_executable(ellipse_compare test/ellipse_compare.cpp)
+    target_link_libraries(ellipse_compare PRIVATE ellipse_detection aamed ${OpenCV_LIBS})
+    target_compile_features(ellipse_compare PRIVATE cxx_std_17)
+endif()
+
+# ============ AAMED 椭圆检测(第三方, BSD-2-Clause) ============
+# 来源: https://github.com/Probably-Zero/AAMED
+# 走的是与上面 standard-ellipse-detection 完全不同的算法路线(弧邻接矩阵);
+# 适配层在 ellipse/aamed_detector.h, 对外结果与 sbm_detect_ellipses 同口径。
+option(USE_AAMED "Build AAMED ellipse detection library and demo" ON)
+if(USE_AAMED)
+    add_subdirectory(third_party/aamed)
+
+    add_executable(aamed_demo aamed_demo.cpp)
+    target_link_libraries(aamed_demo PRIVATE aamed ${OpenCV_LIBS})
+    option(USE_AAMED_CHECK "Build AAMED output-convention self-check (off by default)" OFF)
+    if(USE_AAMED_CHECK)
+        # 校验适配层输出的 (cx,cy,a,b,phi) 能否还原已知几何 (合成椭圆 -> IoU)。
+        # 默认关闭: 它只在口径被改动时才需要跑, 混进常规构建只会拖慢编译。
+        add_executable(aamed_fitcheck test/aamed_fitcheck.cpp)
+        target_link_libraries(aamed_fitcheck PRIVATE aamed ${OpenCV_LIBS})
+    endif()
+endif()
+
 # OpenCV 运行时 DLL 所在目录 (供 pybind 模块与 C ABI 模块拷贝依赖)
 set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
 
@@ -271,6 +299,9 @@ if (USE_C_ABI)
         "${CMAKE_CURRENT_SOURCE_DIR}/c_api"
     )
     target_link_libraries(${PROJECT_NAME}_c PRIVATE ${PROJECT_NAME}_core ellipse_detection)
+    if(USE_AAMED)
+        target_link_libraries(${PROJECT_NAME}_c PRIVATE aamed)
+    endif()
     if(MSVC)
         # 与 pybind 模块一致: Debug 也用 release CRT(/MD)
         target_compile_options(${PROJECT_NAME}_c PRIVATE "$<$<CONFIG:Debug>:/MD>")

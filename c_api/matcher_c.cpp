@@ -13,10 +13,16 @@
 
 #include "../core/matcher_core.h"
 #include "../third_party/ellipse_detection/include/detect.h"
+#include "../ellipse/aamed_detector.h"   // AAMED 适配层 (输出 sbm_ellipse_t 口径)
 
 namespace {
 
+/* sbm_last_error 收的是 void*, 而精配器句柄与 AAMED 检测器句柄是两种不同布局。
+ * 用 offset 0 的 magic 区分, 免得把 AAMED 句柄当成精配器句柄读野内存。 */
+enum { SBM_HANDLE_MAGIC_MATCHER = 1, SBM_HANDLE_MAGIC_AAMED = 2 };
+
 struct SbmHandle {
+    int magic;
     sbm::MatcherCore core;
     std::string last_error;
     std::string last_class_id;                 // sbm_add_template_class 的返回值
@@ -102,7 +108,9 @@ sbm::ThresholdSearchOptions search_options_from_c(const sbm_threshold_search_par
 extern "C" {
 
 void* sbm_create(void) {
-    return new SbmHandle();
+    SbmHandle* h = new SbmHandle();
+    h->magic = SBM_HANDLE_MAGIC_MATCHER;
+    return h;
 }
 
 void sbm_destroy(void* handle) {
@@ -514,13 +522,166 @@ SBM_API int sbm_detect_ellipses(const sbm_image_t* image,
     }
 }
 
-const char* sbm_last_error(void* handle) {
-    SbmHandle* h = as_handle(handle);
+/* ============================ AAMED 椭圆检测 ============================
+ * 与上面 standard-ellipse-detection 那一路共用 g_ellipse_last_error 作为
+ * 无句柄调用的错误串缓冲, 所以 sbm_last_error(NULL) 两种接口都能取到。 */
+namespace {
+
+struct SbmAamedHandle {
+    int magic;
+    sbm::AamedDetector detector;
+    std::string last_error;
+};
+
+sbm::AamedParams aamed_params_from_c(const sbm_aamed_params_t* p) {
+    sbm::AamedParams out = sbm::aamed_params_default();
+    if (!p) return out;
+    // 与其它参数结构一致的约定: NULL / <=0 一律解释为"用默认"
+    if (p->theta_fsa > 0.0) out.theta_fsa = p->theta_fsa;
+    if (p->length_fsa > 0.0) out.length_fsa = p->length_fsa;
+    if (p->t_val > 0.0) out.t_val = p->t_val;
+    if (p->min_goodness > 0.0) out.min_goodness = p->min_goodness;
+    if (p->nms_iou > 0.0) out.nms_iou = p->nms_iou;
+    return out;
+}
+
+// 把 sbm::AamedEllipse 搬到 C ABI 的 sbm_ellipse_t。
+// 两个结构体字段布局相同 (6 个 double), 这里逐字段写, 免得以后加字段时悄悄错位。
+void write_aamed_ellipse(const sbm::AamedEllipse& src, sbm_ellipse_t* dst) {
+    dst->cx = src.cx;
+    dst->cy = src.cy;
+    dst->a = src.a;
+    dst->b = src.b;
+    dst->phi = src.phi;
+    dst->goodness = src.goodness;
+    dst->coverangle = src.coverangle;   // AAMED 不产出, 恒 0
+}
+
+}  // namespace
+
+SBM_API void sbm_aamed_params_init(sbm_aamed_params_t* params) {
+    if (!params) return;
+    const sbm::AamedParams d = sbm::aamed_params_default();
+    params->theta_fsa = d.theta_fsa;
+    params->length_fsa = d.length_fsa;
+    params->t_val = d.t_val;
+    params->min_goodness = d.min_goodness;
+    params->nms_iou = d.nms_iou;
+}
+
+SBM_API void* sbm_aamed_create(int rows, int cols) {
+    try {
+        auto* h = new SbmAamedHandle();
+        h->magic = SBM_HANDLE_MAGIC_AAMED;
+        h->detector.prepare(rows, cols);
+        return h;
+    } catch (const std::exception& e) {
+        g_ellipse_last_error = std::string("sbm_aamed_create: ") + e.what();
+        return nullptr;
+    } catch (...) {
+        g_ellipse_last_error = "unknown error in sbm_aamed_create";
+        return nullptr;
+    }
+}
+
+SBM_API void sbm_aamed_destroy(void* handle) {
+    delete static_cast<SbmAamedHandle*>(handle);
+}
+
+SBM_API int sbm_aamed_detect(void* handle, const sbm_image_t* image,
+                             const sbm_aamed_params_t* params,
+                             sbm_ellipse_t* out_ellipses, int max_ellipses) {
+    auto* h = static_cast<SbmAamedHandle*>(handle);
     if (!h) {
-        // 无句柄调用(如 sbm_detect_ellipses)的错误串
+        g_ellipse_last_error = "sbm_aamed_detect: null detector handle";
+        return -1;
+    }
+    h->last_error.clear();
+    try {
+        if (max_ellipses < 0) max_ellipses = 0;
+        cv::Mat m = image_to_mat(image);
+        if (m.empty()) {
+            h->last_error = "sbm_aamed_detect: invalid image (null data or zero size)";
+            return -1;
+        }
+        cv::Mat gray;
+        if (m.channels() == 3) {
+            cv::cvtColor(m, gray, cv::COLOR_BGR2GRAY);
+        } else {
+            gray = m;
+        }
+
+        const sbm::AamedParams p = aamed_params_from_c(params);
+        std::vector<sbm::AamedEllipse> ells;
+        const int n = h->detector.detect(gray, p, ells);
+
+        if (out_ellipses && max_ellipses > 0) {
+            const int write_n = (max_ellipses < n) ? max_ellipses : n;
+            for (int i = 0; i < write_n; ++i) write_aamed_ellipse(ells[i], &out_ellipses[i]);
+        }
+        return n;
+    } catch (const std::exception& e) {
+        h->last_error = std::string("sbm_aamed_detect: ") + e.what();
+        return -2;
+    } catch (...) {
+        h->last_error = "unknown error in sbm_aamed_detect";
+        return -3;
+    }
+}
+
+SBM_API int sbm_detect_ellipses_aamed(const sbm_image_t* image,
+                                      const sbm_aamed_params_t* params,
+                                      sbm_ellipse_t* out_ellipses,
+                                      int max_ellipses) {
+    g_ellipse_last_error.clear();
+    try {
+        if (max_ellipses < 0) max_ellipses = 0;
+        cv::Mat m = image_to_mat(image);
+        if (m.empty()) {
+            g_ellipse_last_error = "sbm_detect_ellipses_aamed: invalid image (null data or zero size)";
+            return -1;
+        }
+        cv::Mat gray;
+        if (m.channels() == 3) {
+            cv::cvtColor(m, gray, cv::COLOR_BGR2GRAY);
+        } else {
+            gray = m;
+        }
+
+        const sbm::AamedParams p = aamed_params_from_c(params);
+        // 按线程缓存: AAMED 内部按像素量级分配内存, 每次调用重建太贵;
+        // 同一尺寸重复调用只会重算, 不重复分配。
+        thread_local sbm::AamedDetector cache;
+        std::vector<sbm::AamedEllipse> ells;
+        const int n = cache.detect(gray, p, ells);
+
+        if (out_ellipses && max_ellipses > 0) {
+            const int write_n = (max_ellipses < n) ? max_ellipses : n;
+            for (int i = 0; i < write_n; ++i) write_aamed_ellipse(ells[i], &out_ellipses[i]);
+        }
+        return n;
+    } catch (const std::exception& e) {
+        g_ellipse_last_error = std::string("sbm_detect_ellipses_aamed: ") + e.what();
+        return -2;
+    } catch (...) {
+        g_ellipse_last_error = "unknown error in sbm_detect_ellipses_aamed";
+        return -3;
+    }
+}
+
+const char* sbm_last_error(void* handle) {
+    // 无句柄调用(如 sbm_detect_ellipses / sbm_detect_ellipses_aamed)的错误串
+    if (!handle) {
         if (!g_ellipse_last_error.empty()) return g_ellipse_last_error.c_str();
         return nullptr;
     }
+    if (static_cast<SbmHandle*>(handle)->magic == SBM_HANDLE_MAGIC_AAMED) {
+        auto* ah = static_cast<SbmAamedHandle*>(handle);
+        if (!ah->last_error.empty()) return ah->last_error.c_str();
+        if (!g_ellipse_last_error.empty()) return g_ellipse_last_error.c_str();
+        return nullptr;
+    }
+    SbmHandle* h = as_handle(handle);
     if (h->last_error.empty()) return nullptr;
     return h->last_error.c_str();
 }
