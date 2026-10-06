@@ -20,17 +20,47 @@ import sys
 from pathlib import Path
 
 # --- 路径设置: 把编译产物所在目录加入 sys.path, 保证能找到 pybind 模块 ---
-script_dir = Path(__file__).parent
-_module_dirs = [
-    script_dir / "build" / "Release",
-    script_dir / "build" / "Debug",
-    script_dir / "build",
-    script_dir / "out" / "build" / "x64-Release",
-    script_dir / "out" / "build" / "x64-Debug",
+# 本文件位于 <project>/python/ 子目录, 而编译产物 (.pyd) 实际在
+#   项目根/out/build/x64-{Release,Debug}/bindings/python/
+# CMake 已在该目录硬链接好 opencv_world4130.dll, 故优先搜索 bindings/python
+# (依赖 DLL 就在身边, 加载不会报"找不到指定的模块")。
+# 全部用相对路径, 项目复制到任意位置都不受影响。
+import os
+
+_project_root = Path(__file__).resolve().parent.parent
+
+# sys.path 搜索顺序: 越靠前越优先。bindings/python 是 pyd 与其依赖
+# DLL (opencv_world4130.dll) 同目录的规范位置, 必须排在最前, 避免误加载根目录
+# 那份没有 DLL 陪伴的陈旧 .pyd。
+_search_order = [
+    _project_root / "out" / "build" / "x64-Release" / "bindings" / "python",
+    _project_root / "out" / "build" / "x64-Debug" / "bindings" / "python",
+    _project_root / "out" / "build" / "x64-Release",
+    _project_root / "out" / "build" / "x64-Debug",
+    _project_root / "build" / "Release",
+    _project_root / "build" / "Debug",
+    _project_root / "build",
 ]
-for _d in _module_dirs:
-    if _d.is_dir() and str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
+_existing = [str(d) for d in _search_order if d.is_dir() and str(d) not in sys.path]
+if _existing:
+    sys.path = _existing + sys.path
+
+# 注册依赖 DLL 所在目录 (Windows 专用, Python 3.8+)。即使 sys.path 误命中了
+# 没有依赖 DLL 陪伴的"孤儿 .pyd"目录, 这里也保证 opencv_world4130.dll 可解析。
+if hasattr(os, "add_dll_directory"):
+    for _d in (
+        _project_root / "out" / "build" / "x64-Release" / "bindings" / "python",
+        _project_root / "out" / "build" / "x64-Release" / "opencv_runtime",
+        _project_root / "out" / "build" / "x64-Release",
+        _project_root / "out" / "build" / "x64-Debug" / "bindings" / "python",
+        _project_root / "out" / "build" / "x64-Debug" / "opencv_runtime",
+        _project_root / "out" / "build" / "x64-Debug",
+    ):
+        if _d.is_dir():
+            try:
+                os.add_dll_directory(str(_d))
+            except OSError:
+                pass
 
 try:
     import shape_based_matching_py
