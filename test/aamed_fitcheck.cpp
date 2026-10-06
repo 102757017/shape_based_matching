@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "../ellipse/aamed_detector.h"
+#include "aamed_detector.h"
 
 static cv::Mat maskOf(const cv::Mat& img, const sbm::AamedEllipse& e) {
     cv::Mat m = cv::Mat::zeros(img.size(), CV_8UC1);

@@ -64,13 +64,13 @@ dist/
 # (脚本多数会自行清理, 这里兜底防止误提交)
 # ============================================================
 test/_ui_smoke/
-py_tests/输出_测试目录/
-py_tests/输出_CABI/
-py_tests/输出_CABI_PY/
-py_tests/ab_旧版输出/
-py_tests/ab_新版输出/
-py_tests/离屏涂抹验证/
-py_tests/离屏验证输出/
+python/tests/输出_测试目录/
+python/tests/输出_CABI/
+python/tests/输出_CABI_PY/
+python/tests/ab_旧版输出/
+python/tests/ab_新版输出/
+python/tests/离屏涂抹验证/
+python/tests/离屏验证输出/
 
 # ============================================================
 # 其他

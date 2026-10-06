@@ -21,7 +21,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "detect.h"
-#include "../ellipse/aamed_detector.h"
+#include "aamed_detector.h"
 
 #include <algorithm>
 #include <chrono>

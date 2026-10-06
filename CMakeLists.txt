@@ -1,3 +1,21 @@
+# ============================================================================
+# shape_based_matching —— 根 CMake（编排器）
+#
+# 本文件只负责：全局工具链（SIMD / OpenCV / OpenMP / MIPP）、跨模块 option、
+# 运行时 DLL 拷贝辅助函数，以及按依赖顺序把各模块挂进来。
+# 每个算法/接口/可执行入口的具体编译规则都在各自的 CMakeLists.txt 里。
+#
+# 目录职责：
+#   src/cuda_icp       ICP 精化库
+#   src/matching       模板匹配内核（line2Dup + matcher_core + auto_threshold + fusion + mask_painter）
+#   src/ellipse        两路椭圆检测（standard + AAMED）集成 + 适配层
+#   bindings/c_api     C ABI（供 C# P/Invoke）
+#   bindings/python    pybind11 绑定
+#   apps/matching      模板匹配 demo / 测试
+#   apps/ellipse       椭圆检测 demo / 基准 / 横向对比
+#   vendored 上游库直接置于 src 各模块内：MIPP→src/matching/MIPP，
+#   ellipse_detection→src/ellipse/ellipse_detection，aamed→src/ellipse/aamed
+# ============================================================================
 cmake_minimum_required(VERSION 3.15)
 project(shape_based_matching)
 
@@ -48,10 +66,15 @@ if(MSVC)
     message(STATUS "SIMD level: ${SBM_SIMD_LEVEL} -> ${SIMD_FLAGS}")
 
     # 警告和调试选项
+    # 注意: /W3 不再放在全局 CMAKE_CXX_FLAGS 里, 而是由各模块 CMakeLists 用
+    #   add_compile_options(/W3) 仅作用于自研目标 —— 这样 vendored 库(ellipse_detection/aamed)
+    #   自己设的 /W2 不会和全局 /W3 冲突, 也就不再产生 D9025 "正在重写 /W3 (用 /W2)"。
     # /wd4464: 相对包含路径含 ".."
     # /wd4309: 第三方 MIPP(mipp_impl_SSE.hxx) 里 SIMD 常量的截断, 改第三方库不划算
     # /wd4849: MSVC 只支持 OpenMP 2.0, edge_scene.cpp 的 collapse(2) 会被忽略(不影响正确性)
-    set(WARNING_FLAGS "/W3 /wd4464 /wd4309 /wd4849")
+    # /wd4244 /wd4267 /wd4305: double→int/float 截断、size_t→int 等精度转换, 主要出自 vendored 头
+    #   (defines.h/types.hpp/FLED.h) 在被自研 TU 包含时透出; 这些与 vendored 库自身 /wd 策略一致。
+    set(WARNING_FLAGS "/wd4464 /wd4309 /wd4849 /wd4244 /wd4267 /wd4305")
     set(DEBUG_FLAGS "/Zi /Od /RTC1")
 
     # 字符集
@@ -72,7 +95,8 @@ if(MSVC)
     # 且必须作用于静态库/共享库/pybind 模块而不只是 EXE, 否则优化会丢失。
     # /INCREMENTAL:NO 消除 "LNK4075 忽略 /INCREMENTAL(由于 /LTCG)" —— Release 本就不该增量链接
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
-    set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
+    # 静态库用 lib.exe 链接，不认 /INCREMENTAL，只保留 /LTCG（配合 /GL 做全程序优化）
+    set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "/LTCG")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
     set(CMAKE_MODULE_LINKER_FLAGS_RELEASE "/LTCG /INCREMENTAL:NO")
 
@@ -158,8 +182,8 @@ if(MSVC)
     endforeach()
 endif()
 
-# include MIPP headers
-include_directories(${INCLUDE_DIRECTORIES} "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/")
+# MIPP（vendored SIMD 头文件库）的 include 路径由 src/matching/CMakeLists.txt
+# 通过 _core 目标的 PUBLIC 暴露，这里不再全局注入。
 
 # icp for refine
 option(USE_CUDA "use cuda or not" OFF)
@@ -171,92 +195,36 @@ if(USE_CUDA)
     add_definitions(-DCUDA_ON)
 endif()
 
-# Debug 配置统一使用 release CRT(/MD)：本机 CPython 无调试库，pybind 扩展必须非 _DEBUG 编译
-# 必须放在 add_subdirectory(cuda_icp) 之前，子目录才能继承
+# 所有配置统一使用 release CRT(/MD)：
+#  - 本机 CPython 无调试库，pybind 扩展必须非 _DEBUG 编译
+#  - 链接的是 release 版 OpenCV 预编译库，用 /MD 避免 _ITERATOR_DEBUG_LEVEL / RuntimeLibrary 冲突
+# 用 CMAKE_MSVC_RUNTIME_LIBRARY 让 CMake 自己在每个配置都输出 /MD（而不是靠 add_compile_options
+# 去覆盖 Debug 下默认的 /MDd），这样不会再出现 D9025“正在重写 /MDd (用 /MD)”的警告。
+# 必须放在 add_subdirectory 之前，子目录目标才能继承。
 if(MSVC)
-    add_compile_options("$<$<CONFIG:Debug>:/MD>")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 endif()
 
-add_subdirectory(cuda_icp)
-
-# ============ 纯 C++ 内核 ============
-# 训练/加载/匹配的完整实现。不依赖 Python / NumPy, Python(通过 pybind 薄壳) 与
-# C#(通过 c_api 的 C ABI) 共用这一份代码。
-add_library(${PROJECT_NAME}_core STATIC
-    line2Dup.cpp
-    core/matcher_core.cpp
-    core/auto_threshold.cpp      # 训练阈值(弱/强)自动探测
-)
-target_include_directories(${PROJECT_NAME}_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core")
-target_link_libraries(${PROJECT_NAME}_core PUBLIC ${OpenCV_LIBS} cuda_icp)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(${PROJECT_NAME}_core PUBLIC OpenMP::OpenMP_CXX)
-endif()
-
-# ============ 椭圆检测(第三方, MIT) ============
-# 来源: https://github.com/memory-overflow/standard-ellipse-detection
-# 已适配 OpenCV 4 并移除无用 LAPACK 依赖, 详见 third_party/ellipse_detection/CMakeLists.txt
+# ============ 跨模块 option ============
 option(USE_ELLIPSE_DETECTION "Build ellipse_detection library and demo" ON)
-if(USE_ELLIPSE_DETECTION)
-    add_subdirectory(third_party/ellipse_detection)
-
-    # 椭圆检测 demo exe
-    add_executable(ellipse_detect_demo ellipse_detect_demo.cpp)
-    target_link_libraries(ellipse_detect_demo PRIVATE ellipse_detection ${OpenCV_LIBS})
-
-    # 椭圆检测调试 exe(逐级输出中间结果)
-    add_executable(ellipse_debug ellipse_debug.cpp)
-    target_link_libraries(ellipse_debug PRIVATE ellipse_detection ${OpenCV_LIBS})
-    target_compile_definitions(ellipse_debug PRIVATE ELLIPSE_DEBUG_PROBE)
-
-    # 性能基准 exe(可选分阶段计时)
-    add_executable(ellipse_bench ellipse_bench.cpp)
-    target_link_libraries(ellipse_bench PRIVATE ellipse_detection ${OpenCV_LIBS})
-    option(ELLIPSE_BENCH_PROFILE "Enable per-phase timing in ellipse_bench" ON)
-    if(ELLIPSE_BENCH_PROFILE)
-        target_compile_definitions(ellipse_bench PRIVATE SBM_ELLIPSE_PROFILE)
-    endif()
-endif()
-
-# ============ 椭圆算法横向对比基准 (需要两路都编译) ============
-# 交错计时 + 合成真值 IoU, 用于回答"这两套椭圆检测到底谁快/谁准"。
-option(ELLIPSE_COMPARE "Build ellipse_compare (standard vs AAMED)" ON)
-if(ELLIPSE_COMPARE AND USE_ELLIPSE_DETECTION AND USE_AAMED)
-    add_executable(ellipse_compare test/ellipse_compare.cpp)
-    target_link_libraries(ellipse_compare PRIVATE ellipse_detection aamed ${OpenCV_LIBS})
-    target_compile_features(ellipse_compare PRIVATE cxx_std_17)
-endif()
-
-# ============ AAMED 椭圆检测(第三方, BSD-2-Clause) ============
-# 来源: https://github.com/Probably-Zero/AAMED
-# 走的是与上面 standard-ellipse-detection 完全不同的算法路线(弧邻接矩阵);
-# 适配层在 ellipse/aamed_detector.h, 对外结果与 sbm_detect_ellipses 同口径。
 option(USE_AAMED "Build AAMED ellipse detection library and demo" ON)
-if(USE_AAMED)
-    add_subdirectory(third_party/aamed)
-
-    add_executable(aamed_demo aamed_demo.cpp)
-    target_link_libraries(aamed_demo PRIVATE aamed ${OpenCV_LIBS})
-    option(USE_AAMED_CHECK "Build AAMED output-convention self-check (off by default)" OFF)
-    if(USE_AAMED_CHECK)
-        # 校验适配层输出的 (cx,cy,a,b,phi) 能否还原已知几何 (合成椭圆 -> IoU)。
-        # 默认关闭: 它只在口径被改动时才需要跑, 混进常规构建只会拖慢编译。
-        add_executable(aamed_fitcheck test/aamed_fitcheck.cpp)
-        target_link_libraries(aamed_fitcheck PRIVATE aamed ${OpenCV_LIBS})
-    endif()
-endif()
-
-# OpenCV 运行时 DLL 所在目录 (供 pybind 模块与 C ABI 模块拷贝依赖)
-set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
-
-# 随产物拷贝的 OpenCV 运行时。默认只拷 release 变体并排除视频编解码附加库:
-#   opencv_world4130.dll            64.8 MB   (真正需要)
-#   opencv_world4130d.dll          126.4 MB   (调试版, Release 包不需要)
-#   opencv_videoio_ffmpeg4130_64.dll 27.3 MB  (视频采集/编码才用, 本项目只处理静态图)
-# 一把梭会把 218 MB 塞进 Release, 按下面规则过滤后只剩 64.8 MB。
+option(USE_C_ABI "Build shape_based_matching_c.dll for C# / other languages" ON)
+option(ELLIPSE_COMPARE "Build ellipse_compare (standard vs AAMED)" ON)
+option(ELLIPSE_BENCH_PROFILE "Enable per-phase timing in ellipse_bench" ON)
+option(USE_AAMED_CHECK "Build AAMED output-convention self-check (off by default)" OFF)
 option(SBM_COPY_OPENCV_DEBUG_DLL "同时拷贝 OpenCV 调试版运行时(opencv_world4130d.dll)" OFF)
 set(SBM_OPENCV_RUNTIME_EXCLUDE "ffmpeg" CACHE STRING
     "拷贝 OpenCV 运行时时按文件名排除的关键字, 分号分隔")
+
+# 随产物拷贝的 OpenCV 运行时。默认只拷 release 变体并排除视频编解码附加库。
+set(OpenCV_RUNTIME_BIN "${OpenCV_DIR}/x64/vc16/bin")
+
+# 唯一的 OpenCV 运行时缓存：所有目标通过“硬链接”共享同一份 DLL。
+#  - 仍保证每个输出目录里都有 opencv_world4130.dll（C# P/Invoke / python import
+#    按相邻目录加载，无需改 PATH）；
+#  - 但磁盘只算一份：硬链接指向同一 inode，不额外占空间，且不需要管理员权限
+#    （比符号链接更适合 Windows 构建机）。
+set(SBM_OPENCV_RUNTIME_CACHE "${CMAKE_BINARY_DIR}/opencv_runtime")
 
 function(sbm_copy_opencv_runtime target_name)
     if(NOT EXISTS "${OpenCV_RUNTIME_BIN}")
@@ -281,169 +249,36 @@ function(sbm_copy_opencv_runtime target_name)
             list(APPEND _picked "${_dll}")
         endif()
     endforeach()
-    if(_picked)
-        add_custom_command(TARGET ${target_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${_picked} $<TARGET_FILE_DIR:${target_name}>
-            COMMAND_EXPAND_LISTS
-        )
+    if(NOT _picked)
+        return()
     endif()
+
+    file(MAKE_DIRECTORY "${SBM_OPENCV_RUNTIME_CACHE}")
+
+    foreach(_dll ${_picked})
+        get_filename_component(_fname "${_dll}" NAME)
+        set(_master "${SBM_OPENCV_RUNTIME_CACHE}/${_fname}")
+        set(_link   "$<TARGET_FILE_DIR:${target_name}>/${_fname}")
+        # 1) 先把 DLL 拷到唯一缓存目录（copy_if_different，多目标并发也安全；
+        #    OpenCV 升级后内容变化会自动更新，所有硬链接随之生效）
+        # 2) 在目标输出目录里建“硬链接”指向同一份文件。用“唯一临时名 + 删除 + 改名”
+        #    的写法保证并发安全、可重入：同一目录被多个目标共用时也不会因
+        #    create_hardlink 目标已存在而失败（rename 会覆盖已存在的 _link）。
+        set(_tmplink "$<TARGET_FILE_DIR:${target_name}>/${_fname}.${target_name}.tmp")
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "${_master}"
+            COMMAND ${CMAKE_COMMAND} -E create_hardlink "${_master}" "${_tmplink}"
+            COMMAND ${CMAKE_COMMAND} -E remove -f "${_link}"
+            COMMAND ${CMAKE_COMMAND} -E rename "${_tmplink}" "${_link}"
+        )
+    endforeach()
 endfunction()
 
-# ============ C ABI (供 C# P/Invoke, 也可被其它语言直接链接) ============
-option(USE_C_ABI "Build shape_based_matching_c.dll for C# / other languages" ON)
-if (USE_C_ABI)
-    add_library(${PROJECT_NAME}_c SHARED c_api/matcher_c.cpp)
-    target_include_directories(${PROJECT_NAME}_c PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/core"
-        "${CMAKE_CURRENT_SOURCE_DIR}/c_api"
-    )
-    target_link_libraries(${PROJECT_NAME}_c PRIVATE ${PROJECT_NAME}_core ellipse_detection)
-    if(USE_AAMED)
-        target_link_libraries(${PROJECT_NAME}_c PRIVATE aamed)
-    endif()
-    if(MSVC)
-        # 与 pybind 模块一致: Debug 也用 release CRT(/MD)
-        target_compile_options(${PROJECT_NAME}_c PRIVATE "$<$<CONFIG:Debug>:/MD>")
-    endif()
-    sbm_copy_opencv_runtime(${PROJECT_NAME}_c)
-endif()
-
-# 涂抹制模 demo(用 mask_painter.h 交互式生成 object_mask)
-add_executable(paint_mask_demo paint_mask_demo.cpp line2Dup.cpp)
-target_link_libraries(paint_mask_demo ${OpenCV_LIBS} cuda_icp)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(paint_mask_demo OpenMP::OpenMP_CXX)
-endif()
-
-# test exe
-add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
-
-# 把测试数据目录的绝对路径写进程序，运行时不再依赖工作目录
-target_compile_definitions(${PROJECT_NAME}_test PRIVATE
-    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/")
-
-# 链接库
-target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS} cuda_icp)
-
-# 添加 OpenMP 链接
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(${PROJECT_NAME}_test OpenMP::OpenMP_CXX)
-endif()
-
-# ============ pybind ============
-if (USE_PYBIND)
-    # ---------- 1. 定位 Python 解释器 ----------
-    # 优先使用 CONDA_PREFIX；否则默认使用本机的 Python 3.11
-    if(DEFINED ENV{CONDA_PREFIX})
-        message(STATUS "Detected active Conda environment: $ENV{CONDA_PREFIX}")
-        set(PYTHON_EXECUTABLE "$ENV{CONDA_PREFIX}/python.exe" CACHE FILEPATH "Python executable")
-    else()
-        set(PYTHON_EXECUTABLE "D:/portable program/python311/python.exe" CACHE FILEPATH "Python executable")
-    endif()
-
-    # ---------- 2. 查找 Python（Development.Module 足够编译扩展） ----------
-    set(Python3_EXECUTABLE "${PYTHON_EXECUTABLE}" CACHE FILEPATH "Python3 executable" FORCE)
-    # 本机安装的是 release 版 CPython，没有 pythonXXX_d.lib。
-    # 强制 pybind11 在 Debug 配置下也链接 release Python 库（否则 LNK1104: python311_d.lib）。
-    set(PYTHON_IS_DEBUG FALSE CACHE BOOL "" FORCE)
-    find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
-    message(STATUS "Using Python: ${Python3_EXECUTABLE} (version ${Python3_VERSION})")
-
-    # ---------- 3. 通过 pip 安装的 pybind11 定位 CMake 配置 ----------
-    execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -c "import pybind11; print(pybind11.get_cmake_dir())"
-        OUTPUT_VARIABLE pybind11_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE PYBIND11_PROBE_RESULT
-    )
-    if(NOT PYBIND11_PROBE_RESULT EQUAL 0)
-        message(FATAL_ERROR "pybind11 not installed for ${Python3_EXECUTABLE}. Run: \"${Python3_EXECUTABLE}\" -m pip install pybind11")
-    endif()
-    find_package(pybind11 CONFIG REQUIRED)
-    message(STATUS "pybind11 found: ${pybind11_DIR}")
-
-    # Debug 编译时 CPython pyconfig.h 会通过 #pragma 自动链接 pythonXXX_d.lib，
-    # 但普通 CPython 不带调试库。这里复制 release 库改名作为替代（标准 workaround）。
-    if(WIN32)
-        set(PY_DEBUG_LIB_DIR "${CMAKE_BINARY_DIR}/py_debug_lib")
-        set(PY_DEBUG_LIB_NAME "python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}_d.lib")
-        # Development.Module 组件下 Python3_LIBRARY 可能为空，直接从解释器目录推导
-        get_filename_component(_py_root "${Python3_EXECUTABLE}" DIRECTORY)
-        set(PY_RELEASE_LIB "${Python3_LIBRARY}")
-        if(NOT PY_RELEASE_LIB OR NOT EXISTS "${PY_RELEASE_LIB}")
-            set(PY_RELEASE_LIB "${_py_root}/libs/python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}.lib")
-        endif()
-        file(MAKE_DIRECTORY "${PY_DEBUG_LIB_DIR}")
-        if(EXISTS "${PY_RELEASE_LIB}" AND NOT EXISTS "${PY_DEBUG_LIB_DIR}/${PY_DEBUG_LIB_NAME}")
-            file(COPY_FILE "${PY_RELEASE_LIB}" "${PY_DEBUG_LIB_DIR}/${PY_DEBUG_LIB_NAME}")
-            message(STATUS "Created fake debug python lib: ${PY_DEBUG_LIB_DIR}/${PY_DEBUG_LIB_NAME}")
-        elseif(NOT EXISTS "${PY_RELEASE_LIB}")
-            message(WARNING "Python release lib not found at ${PY_RELEASE_LIB}; Debug link may fail")
-        endif()
-    endif()
-
-    # ---------- 4. 查找 NumPy include 目录 ----------
-    set(PYTHON_NUMPY_INCLUDE_DIR "")
-    execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -c "import numpy; print(numpy.get_include())"
-        OUTPUT_VARIABLE NUMPY_PATH_TEMP
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE NUMPY_RESULT
-    )
-    if(NUMPY_RESULT EQUAL 0 AND NUMPY_PATH_TEMP)
-        string(STRIP "${NUMPY_PATH_TEMP}" NUMPY_PATH)
-        if(EXISTS "${NUMPY_PATH}/numpy/arrayobject.h")
-            set(PYTHON_NUMPY_INCLUDE_DIR "${NUMPY_PATH}")
-            message(STATUS "Found NumPy include dir: ${NUMPY_PATH}")
-        else()
-            message(STATUS "NumPy include path invalid: [${NUMPY_PATH}/numpy/arrayobject.h]")
-        endif()
-    else()
-        message(STATUS "NumPy probe failed: result=${NUMPY_RESULT} output=[${NUMPY_PATH_TEMP}]")
-    endif()
-    if(NOT PYTHON_NUMPY_INCLUDE_DIR)
-        message(FATAL_ERROR "NumPy not found for ${Python3_EXECUTABLE}. Run: \"${Python3_EXECUTABLE}\" -m pip install numpy")
-    endif()
-
-    # ---------- 5. 编译 pybind 模块 (薄壳, 逻辑在 _core 里) ----------
-    set(SOURCE_PYBIND
-        pybind11/pybind11.cpp
-        pybind11/py_matcher.cpp
-        pybind11/np2mat/ndarray_converter.cpp
-    )
-    pybind11_add_module(${PROJECT_NAME}_py ${SOURCE_PYBIND})
-    if(MSVC)
-        # 追加在 pybind11_add_module 自动的 /MDd 之后，保证 /MD 生效
-        target_compile_options(${PROJECT_NAME}_py PRIVATE "$<$<CONFIG:Debug>:/MD>")
-    endif()
-    if(WIN32)
-        target_link_directories(${PROJECT_NAME}_py PRIVATE "${PY_DEBUG_LIB_DIR}")
-    endif()
-    target_link_libraries(${PROJECT_NAME}_py PRIVATE
-        ${PROJECT_NAME}_core        # 纯 C++ 内核 (静态链接, 不含 Python 依赖)
-        ellipse_detection           # 椭圆检测 (detect_ellipses)
-        ${OpenCV_LIBS}
-        cuda_icp
-    )
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(${PROJECT_NAME}_py PRIVATE OpenMP::OpenMP_CXX)
-    endif()
-    target_include_directories(${PROJECT_NAME}_py PRIVATE
-        ${PYTHON_NUMPY_INCLUDE_DIR}
-        "${CMAKE_CURRENT_SOURCE_DIR}/core"
-    )
-
-    # 构建后把 OpenCV DLL 复制到模块旁边，保证 import 时能加载
-    sbm_copy_opencv_runtime(${PROJECT_NAME}_py)
-endif()
-
-# fusion 流水线(SIMD 融合)对比测试 exe, 来自 fusion_fix_memo 分支
-add_executable(${PROJECT_NAME}_test_fusion line2Dup.cpp test_fusion.cpp)
-# 把测试数据目录的绝对路径写进程序，运行时不再依赖工作目录
-target_compile_definitions(${PROJECT_NAME}_test_fusion PRIVATE
-    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/")
-target_link_libraries(${PROJECT_NAME}_test_fusion ${OpenCV_LIBS} cuda_icp)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(${PROJECT_NAME}_test_fusion OpenMP::OpenMP_CXX)
-endif()
+# ============ 模块编排（顺序即依赖顺序） ============
+add_subdirectory(src/cuda_icp)        # 产出 cuda_icp
+add_subdirectory(src/matching)        # 产出 shape_based_matching_core（依赖 cuda_icp）
+add_subdirectory(src/ellipse)         # 接入两路椭圆检测 + aamed 适配层
+add_subdirectory(bindings/c_api)      # C ABI（依赖 core + 椭圆检测）
+add_subdirectory(bindings/python)     # pybind（依赖 core + 椭圆检测 + cuda_icp）
+add_subdirectory(apps/matching)       # 模板匹配 demo / 测试
+add_subdirectory(apps/ellipse)        # 椭圆检测 demo / 基准 / 横向对比

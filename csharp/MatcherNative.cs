@@ -813,6 +813,11 @@ namespace ShapeBasedMatching
         /// 调小=更严格。需本项目把 SELECT_CLUSTER_METHOD 设为 OUR_CLUSTER_METHOD
         /// (基于 IoU 的 NMS) 才会生效, 默认的 PRASAD 几何聚类不吃这个参数。</summary>
         public double NmsIou;
+        /// <summary>动态验证门槛开关。true 时忽略 TVal, 改用论文式自适应值:
+        /// T_val = 0.7 + 0.3*(1 - exp(-2*contrast)), contrast = std(gray)/mean(gray)。
+        /// 高对比(边缘干净)自动收紧 -> 抑制金属反光类"幽灵椭圆"假阳性;
+        /// 低对比自动放松 -> 减少残缺椭圆漏检。取值夹在 [0.5, 0.98]。默认 false。</summary>
+        public bool AdaptiveTval;
 
         /// <summary>一份与 C++ 侧一致的默认参数 (60°, 3.4, 0.77, 不筛, IoU 0.7)</summary>
         public static AamedParams Default()

@@ -31,15 +31,19 @@ else:
 ext_modules = [
     Extension(
         'shape_based_matching_py',
-        ['pybind11/pybind11.cpp',
-         'pybind11/np2mat/ndarray_converter.cpp',
-         'line2Dup.cpp'],
+        ['bindings/python/pybind11.cpp',
+         'bindings/python/np2mat/ndarray_converter.cpp',
+         'src/matching/line2Dup.cpp',
+         'src/matching/matcher_core.cpp',
+         'src/matching/auto_threshold.cpp'],
         include_dirs=[
             pybind11.get_include(),
             '.',
             OPENCV_INCLUDE_DIR,        # OpenCV 头文件路径
-            './MIPP',                  #  mipp.h 在此路径下
-            './pybind11',
+            './src/matching/MIPP',      #  mipp.h 在此路径下
+            './bindings/python',       #  pybind11 源 + np2mat 转换层
+            './src/matching',          #  line2Dup.h / fusion.h / matcher_core.h
+            './src/cuda_icp',         #  icp.h / geometry.h
         ],
         library_dirs=[OPENCV_LIB_DIR], # OpenCV 库文件路径
         libraries=opencv_libs,         # 要链接的库名（不含 .lib 后缀）

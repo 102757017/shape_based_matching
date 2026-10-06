@@ -17,7 +17,7 @@ halcon match solution guide for how to select matching methods([halcon documenta
 
 ## steps
 
-1. change test.cpp line 9 prefix to top level folder
+1. change apps/matching/test.cpp 里写死的测试数据前缀为你本地顶层文件夹
 
 2. in cmakeList line 23, change /opt/ros/kinetic to somewhere opencv3 can be found(if opencv3 is installed in default env then don't need to)
 
@@ -99,7 +99,7 @@ test img & templ features
 
 ## ellipse detection (integrated)
 
-Integrated [standard-ellipse-detection](https://github.com/memory-overflow/standard-ellipse-detection) (MIT) as a submodule library at `third_party/ellipse_detection/`.
+Integrated [standard-ellipse-detection](https://github.com/memory-overflow/standard-ellipse-detection) (MIT) as a vendored library at `src/ellipse/ellipse_detection/`.
 
 Adaptations for this project (OpenCV 4.13 + MSVC, no LAPACK):
 1. Replaced the vestigial LAPACK `dggev_` call in `fitEllipse` with `Eigen::GeneralizedEigenSolver` (same semantics: eigenvalue = alpha/beta). Eigen path: `EIGEN3_ROOT` (same as cuda_icp).

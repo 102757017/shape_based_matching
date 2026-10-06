@@ -1,0 +1,79 @@
+# opencv
+find_package(OpenCV 4 REQUIRED)
+list(APPEND icp_inc ${OpenCV_INCLUDE_DIRS})
+list(APPEND icp_lib ${OpenCV_LIBS})
+
+if(USE_CUDA)
+    # cuda
+    find_package(CUDA REQUIRED)
+    
+    # MSVC 下使用简单的 CUDA 选项
+    if(MSVC)
+        set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -std=c++11 -O3")
+    else()
+        set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -std=c++11 -O3 --default-stream per-thread")
+    endif()
+    
+    list(APPEND icp_inc ${CUDA_INCLUDE_DIRS})
+    list(APPEND icp_lib ${CUDA_LIBRARIES})
+endif()
+
+# eigen
+set(EIGEN3_ROOT "E:/programing/eigen-3.4.0" CACHE PATH "Eigen root directory")
+if(EXISTS "${EIGEN3_ROOT}/Eigen/Core")
+    message(STATUS "Using Eigen from: ${EIGEN3_ROOT}")
+    list(APPEND icp_inc ${EIGEN3_ROOT})
+else()
+    message(FATAL_ERROR "Eigen not found at: ${EIGEN3_ROOT}")
+endif()
+
+# src
+SET(icp_cuda_srcs  icp.cu scene/common.cu scene/edge_scene/edge_scene.cu scene/kdtree_scene/kdtree_scene.cu)
+SET(icp_srcs  icp.cpp scene/common.cpp scene/edge_scene/edge_scene.cpp scene/kdtree_scene/kdtree_scene.cpp)
+
+# 启用 OpenMP - 使用现代 CMake 方式
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "OpenMP found for cuda_icp")
+endif()
+
+# 设置源代码特定属性
+if(MSVC)
+    # 为 MSVC 设置 /W3（自研代码）并禁用某些警告
+    add_compile_options(/W3 /wd4464 /wd4068 /wd4127 /wd4100 /wd4189)
+endif()
+
+# 创建库
+add_library(cuda_icp
+    ${icp_srcs}
+    ${icp_cuda_srcs}
+)
+
+# 包含目录（含自身源码目录，使 "icp.h" / "geometry.h" 可被外部按纯文件名引用）
+target_include_directories(cuda_icp PUBLIC ${icp_inc} ${CMAKE_CURRENT_SOURCE_DIR})
+
+# 链接库
+target_link_libraries(cuda_icp PUBLIC ${icp_lib})
+
+# 添加 OpenMP
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(cuda_icp PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+# MSVC 特定设置
+if(MSVC)
+    # 设置目标属性
+    set_target_properties(cuda_icp PROPERTIES
+        COMPILE_FLAGS "/EHsc /utf-8"
+    )
+    # 优化/SIMD(/O2 /Ob2 /GL /arch:*) 与 OpenMP 由顶层 CMakeLists.txt 统一提供,
+    # 这里不要重复 add_compile_options: "带空格的字符串" 会被 MSBuild 拆碎传参,
+    # 产生一串 D9002(忽略未知选项 /Oo /Op /Oe ...)。
+endif()
+
+# 设置输出目录
+set_target_properties(cuda_icp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
