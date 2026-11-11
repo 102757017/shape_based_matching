@@ -83,3 +83,6 @@ python/tests/离屏验证输出/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 各机器本地的依赖路径覆盖（由 scripts/configure.local.bat.example 复制而来，不进仓库）
+scripts/configure.local.bat

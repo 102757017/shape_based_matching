@@ -1,0 +1,12 @@
+@echo off
+REM ============================================================================
+REM Local dependency paths - TEMPLATE (values differ per machine; do not commit this file).
+REM Usage: copy this file to configure.local.bat in the same dir, then fill in your
+REM         machine's real paths. configure.bat will source it automatically
+REM         (configure.local.bat is git-ignored).
+REM
+REM The values below are EXAMPLES from dev machine A, for format reference only:
+REM ============================================================================
+set "OpenCV_DIR=E:/ToolChain/opencv4/build"
+set "EIGEN3_ROOT=E:/ToolChain/eigen-3.4.0"
+set "PYTHON_EXECUTABLE=E:/python311/python.exe"

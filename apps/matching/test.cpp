@@ -3,17 +3,37 @@
 #include <iostream>
 #include <assert.h>
 #include <chrono>
+#include <sstream>
 
 #include "icp.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+// Windows 下把命令行宽字符参数统一转成 UTF-8，
+// 既保证中文路径能正确传给 imread，又能在 UTF-8 控制台正确显示。
+static std::vector<std::string> getUtf8Args() {
+    int n = 0;
+    std::vector<std::string> out;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (wargv) {
+        for (int i = 0; i < n; i++) {
+            int sz = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, nullptr, 0, nullptr, nullptr);
+            std::string s(sz, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, &s[0], sz, nullptr, nullptr);
+            s.pop_back(); // 去掉结尾的 '\0'
+            out.push_back(s);
+        }
+        LocalFree(wargv);
+    }
+    return out;
+}
+#endif
 
 using namespace std;
 using namespace cv;
 
-#ifdef TEST_DATA_DIR
-static std::string prefix = TEST_DATA_DIR;
-#else
-static std::string prefix = "test/";
-#endif
+// 数据根目录现在由命令行 --data 指定（见 main），不再使用全局 prefix
 
 // NMS, got from cv::dnn so we don't need opencv contrib
 // just collapse it
@@ -111,17 +131,28 @@ void NMSBoxes(const std::vector<Rect>& bboxes, const std::vector<float>& scores,
 
 // Timer 类已在 line2Dup.h 中定义(fusion 合并引入, 带 record/display 功能), 这里直接使用
 
-void angle_test(string mode = "test", bool viewICP = false){
-    line2Dup::Detector detector(128, {4, 8});
+void angle_test(const std::string& mode, bool viewICP,
+                const std::string& dataDir, const std::string& caseName,
+                const std::string& sceneImg, const std::string& trainImg,
+                const cv::Rect& trainRoi, const std::string& classId,
+                const std::vector<float>& angleRange = {0.f, 360.f},
+                float angleStep = 1.f,
+                const std::vector<int>& pyramidT = {4, 8},
+                int numFeatures = 128,
+                float weakThresh = 30.f, float strongThresh = 60.f){
+    line2Dup::Detector detector(numFeatures, pyramidT, weakThresh, strongThresh);
     detector.set_produce_dxy = true;  // 让 match() 输出 dx_/dy_ 供后续 ICP 精修使用
+
+    std::cout << "mode=" << mode << " dataDir=" << dataDir
+              << " case=" << caseName << " class=" << classId << std::endl;
 
 //    mode = "test";
     if(mode == "train"){
-        Mat img = imread(prefix+"case1/train.png");
+        std::string trainPath = trainImg.empty() ? (dataDir + caseName + "/train.png") : trainImg;
+        Mat img = imread(trainPath);
         assert(!img.empty() && "check your img path");
 
-        Rect roi(130, 110, 270, 270);
-        img = img(roi).clone();
+        img = img(trainRoi).clone();
         Mat mask = Mat(img.size(), CV_8UC1, {255});
 
         // padding to avoid rotating out
@@ -133,14 +164,16 @@ void angle_test(string mode = "test", bool viewICP = false){
         mask.copyTo(padded_mask(Rect(padding, padding, img.cols, img.rows)));
 
         shape_based_matching::shapeInfo_producer shapes(padded_img, padded_mask);
-        shapes.angle_range = {0, 360};
-        shapes.angle_step = 1;
+        shapes.angle_range = angleRange;
+        shapes.angle_step = angleStep;
         shapes.produce_infos();
         std::vector<shape_based_matching::shapeInfo_producer::Info> infos_have_templ;
-        string class_id = "test";
+        string class_id = classId;
         for(auto& info: shapes.infos){
-            imshow("train", shapes.src_of(info));
-            waitKey(1);
+            if(viewICP){
+                imshow("train", shapes.src_of(info));
+                waitKey(1);
+            }
 
             std::cout << "\ninfo.angle: " << info.angle << std::endl;
             int templ_id = detector.addTemplate(shapes.src_of(info), class_id, shapes.mask_of(info));
@@ -149,18 +182,19 @@ void angle_test(string mode = "test", bool viewICP = false){
                 infos_have_templ.push_back(info);
             }
         }
-        detector.writeClasses(prefix+"case1/%s_templ.yaml");
-        shapes.save_infos(infos_have_templ, prefix + "case1/test_info.yaml");
+        detector.writeClasses(dataDir + caseName + "/%s_templ.yaml");
+        shapes.save_infos(infos_have_templ, dataDir + caseName + "/test_info.yaml");
         std::cout << "train end" << std::endl << std::endl;
     }else if(mode=="test"){
         std::vector<std::string> ids;
-        ids.push_back("test");
-        detector.readClasses(ids, prefix+"case1/%s_templ.yaml");
+        ids.push_back(classId);
+        detector.readClasses(ids, dataDir + caseName + "/%s_templ.yaml");
 
         // angle & scale are saved here, fetched by match id
-        auto infos = shape_based_matching::shapeInfo_producer::load_infos(prefix + "case1/test_info.yaml");
+        auto infos = shape_based_matching::shapeInfo_producer::load_infos(dataDir + caseName + "/test_info.yaml");
 
-        Mat test_img = imread(prefix+"case1/train.png");
+        std::string scenePath = sceneImg.empty() ? (dataDir + caseName + "/train.png") : sceneImg;
+        Mat test_img = imread(scenePath);
         assert(!test_img.empty() && "check your img path");
 
         int padding = 100;
@@ -330,9 +364,112 @@ void MIPP_test(){
     std::cout << "----------" << std::endl << std::endl;
 }
 
-int main(){
+static std::string ensureTrailingSlash(const std::string& s){
+    if(s.empty()) return s;
+    if(s.back()=='/' || s.back()=='\\') return s;
+    return s + "/";
+}
+
+// 解析逗号分隔的数字列表, 例如 "-45,90" -> {-45, 90}; "4,8" -> {4, 8}
+static std::vector<float> parseFloats(const std::string& s){
+    std::vector<float> out; std::istringstream iss(s); std::string tok;
+    while(std::getline(iss, tok, ',')){ if(!tok.empty()) out.push_back(std::stof(tok)); }
+    return out;
+}
+static std::vector<int> parseInts(const std::string& s){
+    std::vector<int> out; std::istringstream iss(s); std::string tok;
+    while(std::getline(iss, tok, ',')){ if(!tok.empty()) out.push_back(std::stoi(tok)); }
+    return out;
+}
+
+static void printUsage(){
+    std::cout
+        << "用法: shape_based_matching_test.exe [选项]\n"
+        << "  --mode <train|test>  运行模式 (默认 test)\n"
+        << "  --data <dir>         数据根目录 (默认 test/ 或编译宏 TEST_DATA_DIR)\n"
+        << "  --case <name>        case 子目录名 (默认 case1)\n"
+        << "  --scene <image>      test 模式的场景图路径 (默认 <data>/<case>/train.png)\n"
+        << "  --train-img <image>  train 模式的物体图路径 (默认 <data>/<case>/train.png)\n"
+        << "  --roi x,y,w,h        train 模式裁剪 ROI (默认 130,110,270,270)\n"
+        << "  --angle-range a,b   训练角度范围(度), 支持单值或区间 (默认 0,360)\n"
+        << "  --angle-step s      训练角度步长(度) (默认 1)\n"
+        << "  --pyramid t1,t2     金字塔容差 T (默认 4,8)\n"
+        << "  --num-features n    每模板最大特征点数 (默认 128)\n"
+        << "  --weak w            弱阈值 weak_thresh (默认 30)\n"
+        << "  --strong s          强阈值 strong_thresh (默认 60)\n"
+        << "  --class <id>         类别 id (默认 test)\n"
+        << "  --view               显示 ICP 可视化 (默认即显示，可省略)\n"
+        << "  --no-view            不显示 ICP 可视化 (避免 waitKey 阻塞)\n"
+        << "  --help               显示本帮助\n";
+}
+
+int main(int argc, char** argv){
+#ifdef _WIN32
+    // 把控制台切换到 UTF-8，避免中文帮助/日志乱码
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    std::vector<std::string> args = getUtf8Args();
+#else
+    std::vector<std::string> args(argv, argv + argc);
+#endif
+    int nargs = (int)args.size();
+
+    std::string mode = "test";
+    std::string dataDir;
+    std::string caseName = "case1";
+    std::string sceneImg, trainImg, classId = "test";
+    bool viewICP = true;   // 默认显示结果图（与原 angle_test("test", true) 行为一致）
+    cv::Rect trainRoi(130, 110, 270, 270);
+    std::vector<float> angleRange = {0.f, 360.f};
+    float angleStep = 1.f;
+    std::vector<int> pyramidT = {4, 8};
+    int numFeatures = 128;
+    float weakThresh = 30.f, strongThresh = 60.f;
+
+    for(int i = 1; i < nargs; i++){
+        std::string a = args[i];
+        auto nextArg = [&]() -> std::string {
+            if(i + 1 < nargs) return std::string(args[++i]);
+            return std::string();
+        };
+        if(a == "--mode")          mode = nextArg();
+        else if(a == "--data")     dataDir = nextArg();
+        else if(a == "--case")     caseName = nextArg();
+        else if(a == "--scene")    sceneImg = nextArg();
+        else if(a == "--train-img") trainImg = nextArg();
+        else if(a == "--class")    classId = nextArg();
+        else if(a == "--roi"){
+            std::string s = nextArg();
+            int x, y, w, h; char c1, c2, c3;
+            std::istringstream iss(s);
+            if((iss >> x >> c1 >> y >> c2 >> w >> c3 >> h) && c1==',' && c2==',' && c3==',')
+                trainRoi = cv::Rect(x, y, w, h);
+            else
+                std::cerr << "无法解析 --roi: " << s << " (应为 x,y,w,h)\n";
+        }
+        else if(a == "--view")     viewICP = true;    // 显式开启（默认即开启，可省略）
+        else if(a == "--no-view")  viewICP = false;   // 关闭可视化，避免 waitKey 阻塞
+        else if(a == "--angle-range") angleRange = parseFloats(nextArg());
+        else if(a == "--angle-step")   angleStep = std::stof(nextArg());
+        else if(a == "--pyramid")      pyramidT = parseInts(nextArg());
+        else if(a == "--num-features") numFeatures = std::stoi(nextArg());
+        else if(a == "--weak")         weakThresh = std::stof(nextArg());
+        else if(a == "--strong")       strongThresh = std::stof(nextArg());
+        else if(a == "--help" || a == "-h"){ printUsage(); return 0; }
+        else { std::cerr << "未知参数: " << a << "\n"; printUsage(); return 1; }
+    }
+
+    if(dataDir.empty()){
+#ifdef TEST_DATA_DIR
+        dataDir = TEST_DATA_DIR;
+#else
+        dataDir = "test/";
+#endif
+    }
+    dataDir = ensureTrailingSlash(dataDir);
 
     MIPP_test();
-    angle_test("test", true); // test or train
+    angle_test(mode, viewICP, dataDir, caseName, sceneImg, trainImg, trainRoi, classId,
+               angleRange, angleStep, pyramidT, numFeatures, weakThresh, strongThresh);
     return 0;
 }
