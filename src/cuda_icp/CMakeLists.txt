@@ -46,10 +46,15 @@ if(MSVC)
 endif()
 
 # 创建库
-add_library(cuda_icp
-    ${icp_srcs}
-    ${icp_cuda_srcs}
-)
+# USE_CUDA=OFF 时本机没有 CUDA 工具链（nvcc），不能把 .cu 交给 MSVC 编译；
+# 所有 CUDA 入口都在 icp.h / scene/*/common.h 里用 #ifdef CUDA_ON 守卫，
+# OFF 时 .cpp 走 CPU 分支即可。故 OFF 只编 .cpp，ON 再追加 .cu 并启用 CUDA 语言。
+if(USE_CUDA)
+    enable_language(CUDA)
+    add_library(cuda_icp ${icp_srcs} ${icp_cuda_srcs})
+else()
+    add_library(cuda_icp ${icp_srcs})
+endif()
 
 # 包含目录（含自身源码目录，使 "icp.h" / "geometry.h" 可被外部按纯文件名引用）
 target_include_directories(cuda_icp PUBLIC ${icp_inc} ${CMAKE_CURRENT_SOURCE_DIR})

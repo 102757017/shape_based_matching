@@ -113,6 +113,7 @@ void NMSBoxes(const std::vector<Rect>& bboxes, const std::vector<float>& scores,
 
 void angle_test(string mode = "test", bool viewICP = false){
     line2Dup::Detector detector(128, {4, 8});
+    detector.set_produce_dxy = true;  // 让 match() 输出 dx_/dy_ 供后续 ICP 精修使用
 
 //    mode = "test";
     if(mode == "train"){
