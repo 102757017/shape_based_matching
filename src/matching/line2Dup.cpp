@@ -1084,6 +1084,127 @@ static int fusion_thread_num(){
     return n;
 }
 
+// 与 fusion_thread_num 一样只读一次环境变量, 避免每次 match 都查环境。
+static bool env_flag(const char* name, bool default_value){
+    char* env = nullptr;
+#ifdef _MSC_VER
+    size_t len = 0;
+    if(_dupenv_s(&env, &len, name) != 0) env = nullptr;
+#else
+    env = std::getenv(name);
+#endif
+    if(!env) return default_value;
+    const bool v = std::atoi(env) != 0;
+#ifdef _MSC_VER
+    std::free(env);
+#endif
+    return v;
+}
+
+// SBM_ROI_RESPONSE_MAP=0 可临时关掉细层响应图的 ROI 裁剪, 用于 A/B 对比。
+static bool roi_response_map_enabled(){
+    static const bool v = env_flag("SBM_ROI_RESPONSE_MAP", true);
+    return v;
+}
+// SBM_ROI_VERBOSE=1 打印每层实际参与计算的 tile 比例, 便于判断收益。
+static bool roi_verbose(){
+    static const bool v = env_flag("SBM_ROI_VERBOSE", false);
+    return v;
+}
+
+/****************************************************************************************\
+*                        候选区域驱动的局部响应图 (ROI response map)                                               *
+\****************************************************************************************/
+
+// fusion 链的前缀: 灰度 -> 两次高斯(顺带产出下一层输入图) -> 两个 Sobel。
+// 这一段必须对整幅图跑: 下一层的 pyrdown 输入, 以及 ICP 精修用的全图 dx_/dy_ 都在这里产生。
+static void appendPrefixNodes(simple_fusion::ProcessManager& manager,
+                              const Mat& src, const Mat& pyrdown_src, bool need_pyr,
+                              bool produce_dxy, const Mat& dx, const Mat& dy)
+{
+    std::vector<std::shared_ptr<simple_fusion::FilterNode>>& nodes = manager.get_nodes();
+    if(src.channels() == 3)
+        nodes.push_back(std::make_shared<simple_fusion::BGR2GRAY_8UC3_8U>());
+    nodes.push_back(std::make_shared<simple_fusion::Gauss1x5Node_8U_32S_4bit_larger>());
+    nodes.push_back(std::make_shared<simple_fusion::Gauss5x1withPyrdownNode_32S_16S_4bit_smaller>(
+                        pyrdown_src, need_pyr));
+    nodes.push_back(std::make_shared<simple_fusion::Sobel1x3SxxSyxNode_16S_16S>());
+    if(produce_dxy)
+        nodes.push_back(std::make_shared<simple_fusion::Sobel3x1SxySyyNodeWithDxy_16S_16S>(dx, dy));
+    else
+        nodes.push_back(std::make_shared<simple_fusion::Sobel3x1SxySyyNode_16S_16S>());
+}
+
+// fusion 链的后缀: 幅值/方向量化 -> 3x3 投票 -> spread -> 8 方向响应图 -> linearize。
+// 这是每层最贵的一段, 而且只有 16x16 局部精化会读它, 因此可以只算候选邻域覆盖的 tile。
+static void appendSuffixNodes(simple_fusion::ProcessManager& manager, int mag_thresh_l2,
+                              int cur_T, int imgCols, const std::vector<Mat>& lm)
+{
+    std::vector<std::shared_ptr<simple_fusion::FilterNode>>& nodes = manager.get_nodes();
+    nodes.push_back(std::make_shared<simple_fusion::MagPhaseQuant1x1Node_16S_8U>(mag_thresh_l2));
+    nodes.push_back(std::make_shared<simple_fusion::Hist3x3Node_8U_8U>());
+    nodes.push_back(std::make_shared<simple_fusion::Spread1xnNode_8U_8U>(cur_T + 1));
+    nodes.push_back(std::make_shared<simple_fusion::Spreadnx1Node_8U_8U>(cur_T + 1));
+    nodes.push_back(std::make_shared<simple_fusion::Response1x1Node_8U_8U>());
+    nodes.push_back(std::make_shared<simple_fusion::LinearizeTxTNode_8U_8U>(cur_T, imgCols, lm));
+}
+
+// 单个模板在最粗层的全图粗搜。matchClass 与 collectCoarseCandidates 共用。
+static void coarseCandidates(const std::vector<Mat>& lowest_lm, const Template& templ,
+                             Size size, int lowest_T, float threshold,
+                             const string& class_id, int template_id,
+                             std::vector<Match>& candidates)
+{
+    candidates.clear();
+    const int num_features = static_cast<int>(templ.features.size());
+    Mat similarities;
+    if(num_features < 64){
+        similarity_64(lowest_lm, templ, similarities, size, lowest_T);
+        similarities.convertTo(similarities, CV_16U);
+    }else if(num_features < 8192){
+        similarity(lowest_lm, templ, similarities, size, lowest_T);
+    }else{
+        CV_Error(Error::StsBadArg, "feature size too large");
+    }
+
+    const int offset = (lowest_T % 2 - 1); // spread has no offset now
+    for(int r = 0; r < similarities.rows; ++r){
+        ushort* row = similarities.ptr<ushort>(r);
+        for(int c = 0; c < similarities.cols; ++c){
+            const float score = (row[c] * 100.f) / (4 * num_features);
+            if(score > threshold)
+                candidates.push_back(Match(c * lowest_T + offset, r * lowest_T + offset,
+                                           score, class_id, template_id));
+        }
+    }
+}
+
+// 把最粗层候选映射到第 to_level 层, 换算成该层响应图必须覆盖的像素矩形。
+// pad 由三部分组成: 16x16 窗口左边界的 8*T(保守取 9*T)、模板包围盒,
+// 以及更粗层精化后候选位置的累计漂移(每往细层走一级放大 2 倍)。
+static void appendCandidateRegions(const std::vector<Match>& candidates,
+                                   int from_level, int to_level,
+                                   const std::vector<int>& T_at_level,
+                                   Size size, const Template& templ,
+                                   std::vector<cv::Rect>& regions)
+{
+    if(candidates.empty()) return;
+    const int T = T_at_level[to_level];
+    int drift = 0;
+    for(int k = to_level + 1; k < from_level; ++k)
+        drift += 8 * T_at_level[k] * (1 << (k - to_level));
+    const int pad = 9 * T + drift;
+    const cv::Rect image_rect(0, 0, size.width, size.height);
+    for(size_t i = 0; i < candidates.size(); ++i){
+        int x = candidates[i].x;
+        int y = candidates[i].y;
+        for(int k = from_level; k > to_level; --k){ x = x * 2 + 1; y = y * 2 + 1; }
+        cv::Rect r(x - pad, y - pad, templ.width + 2 * pad, templ.height + 2 * pad);
+        r &= image_rect;
+        if(!r.empty()) regions.push_back(r);
+    }
+}
+
 std::vector<Match> Detector::match(Mat source, float threshold, const std::vector<string> &class_ids, const Mat mask)
 {
     dx_ = cv::Mat();
@@ -1112,86 +1233,152 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
     const int num_threads_ = fusion_thread_num();
 
     const int32_t mag_thresh_l2 = int32_t(res_map_mag_thresh*res_map_mag_thresh);
+    const int levels = pyramid_levels;
 
-    cv::Mat pyrdown_src;
-    for(int cur_l = 0; cur_l<T_at_level.size(); cur_l++){
+    // 每层前缀的输出(两张 Sobel 图)与下采样图。前缀对整幅图只算一次,
+    // 之后各层后缀都从这些缓存图里取 tile; 由于缓存里每个像素都是完整的
+    // 全图卷积结果, 拆链与原来一整条链连续跑在数值上完全一致。
+    std::vector<Mat> src_at(levels);
+    std::vector<Mat> sobel_a(levels), sobel_b(levels);
+    std::vector<Mat> pyrdown_at(levels);
+
+    // ---- 阶段 1: 每层全图跑前缀, 产出下一层输入图 / Sobel 结果 / ICP 梯度
+    for(int cur_l = 0; cur_l < levels; cur_l++){
 #ifdef DEBUG_MATCH_TIME
         timer.reset();
 #endif
-        const bool need_pyr = cur_l < T_at_level.size() - 1;
+        const bool need_pyr = cur_l < levels - 1;
 
         const int imgRows = biggest_imgRows >> cur_l;
         const int imgCols = biggest_imgCols >> cur_l;
 
         const int cur_T = T_at_level[cur_l];
         assert(cur_T % 2 == 0);
-
-        // use old linear function will create those for us
-        for(int ori=0; ori<8; ori++){
-            lm_pyramid[cur_l][0][ori] = cv::Mat(cur_T*cur_T, imgCols/cur_T*imgRows/cur_T, CV_8U);
-        }
-
         sizes.push_back({imgCols, imgRows});
 
-        cv::Mat src;
-        if(cur_l == 0) src = source;
-        else src = pyrdown_src;
+        src_at[cur_l] = (cur_l == 0) ? source : pyrdown_at[cur_l - 1];
+        if(need_pyr) pyrdown_at[cur_l] = Mat(imgRows/2, imgCols/2, CV_8U);
 
-        if(need_pyr) pyrdown_src = cv::Mat(imgRows/2, imgCols/2, CV_8U);
+        const bool is_coarsest = (cur_l == levels - 1);
+        if(!is_coarsest){
+            sobel_a[cur_l] = Mat(imgRows, imgCols, CV_16S);
+            sobel_b[cur_l] = Mat(imgRows, imgCols, CV_16S);
+        }
+
+        const bool produce_dxy = set_produce_dxy && cur_l == 0;
+        if(produce_dxy){
+            dx_ = Mat(src_at[cur_l].size(), CV_16S, Scalar(0));
+            dy_ = Mat(src_at[cur_l].size(), CV_16S, Scalar(0));
+        }
+
+        for(int ori=0; ori<8; ori++)
+            lm_pyramid[cur_l][0][ori] = Mat(cur_T*cur_T, imgCols/cur_T*imgRows/cur_T, CV_8U);
 
         simple_fusion::ProcessManager manager(fusion_buffers, tileRows, tileCols);
         manager.set_num_threads(num_threads_);
-        if(src.channels() == 3)
-            manager.get_nodes().push_back(std::make_shared<simple_fusion::BGR2GRAY_8UC3_8U>());
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::Gauss1x5Node_8U_32S_4bit_larger>());
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::Gauss5x1withPyrdownNode_32S_16S_4bit_smaller>(
-                                          pyrdown_src, need_pyr));
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::Sobel1x3SxxSyxNode_16S_16S>());
-
-        if(set_produce_dxy && cur_l == 0){
-            dx_ = cv::Mat(src.size(), CV_16S, cv::Scalar(0));
-            dy_ = cv::Mat(src.size(), CV_16S, cv::Scalar(0));
-            manager.get_nodes().push_back(std::make_shared<simple_fusion::Sobel3x1SxySyyNodeWithDxy_16S_16S>(dx_, dy_));
+        appendPrefixNodes(manager, src_at[cur_l], pyrdown_at[cur_l], need_pyr,
+                          produce_dxy, dx_, dy_);
+        if(is_coarsest){
+            // 最粗层要做全局粗搜, 一次跑完整链即可, 与旧实现完全一致。
+            appendSuffixNodes(manager, mag_thresh_l2, cur_T, imgCols, lm_pyramid[cur_l][0]);
+            manager.arrange(imgRows, imgCols);
+            manager.process({src_at[cur_l]}, lm_pyramid[cur_l][0]);
         }else{
-            manager.get_nodes().push_back(std::make_shared<simple_fusion::Sobel3x1SxySyyNode_16S_16S>());
+            // 细层先只跑前缀; 后缀等候选区域确定后再按需补算。
+            manager.arrange(imgRows, imgCols);
+            manager.process({src_at[cur_l]}, {sobel_a[cur_l], sobel_b[cur_l]});
         }
-
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::MagPhaseQuant1x1Node_16S_8U>(mag_thresh_l2));
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::Hist3x3Node_8U_8U>());
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::Spread1xnNode_8U_8U>(cur_T + 1));
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::Spreadnx1Node_8U_8U>(cur_T + 1));
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::Response1x1Node_8U_8U>());
-        manager.get_nodes().push_back(std::make_shared<simple_fusion::LinearizeTxTNode_8U_8U>(cur_T, imgCols,
-                                                                                              lm_pyramid[cur_l][0]));
-        manager.arrange(imgRows, imgCols);
-
-        std::vector<cv::Mat> in_v;
-        in_v.push_back(src);
-
-        std::vector<cv::Mat> out_v = lm_pyramid[cur_l][0];
-        manager.process(in_v, out_v);
 #ifdef DEBUG_MATCH_TIME
         timer.out("fusion time");
 #endif
     }
 #ifdef DEBUG_MATCH_TIME
-    timer.out("construct response map");
+    timer.out("construct coarse response map");
 #endif
+    // ---- 阶段 3: 先把所有类别/模板在最粗层的候选一次性算出来。
+    // 这些候选既是 matchClass 精化的输入, 也是细层响应图裁剪范围的依据。
+    struct ClassWork
+    {
+        string class_id;
+        const std::vector<TemplatePyramid>* template_pyramids;
+        std::vector<std::vector<Match>> candidates;
+    };
+    std::vector<ClassWork> works;
     if (class_ids.empty())
     {
-        // Match all templates
-        TemplatesMap::const_iterator it = class_templates.begin(), itend = class_templates.end();
-        for (; it != itend; ++it)
-            matchClass(lm_pyramid, sizes, threshold, matches, it->first, it->second);
-    }
-    else{
-        // Match only templates for the requested class IDs
-        for (int i = 0; i < (int)class_ids.size(); ++i){
-            TemplatesMap::const_iterator it = class_templates.find(class_ids[i]);
-            if (it != class_templates.end())
-                matchClass(lm_pyramid, sizes, threshold, matches, it->first, it->second);
+        for (TemplatesMap::const_iterator it = class_templates.begin(), itend = class_templates.end();
+             it != itend; ++it){
+            ClassWork w;
+            w.class_id = it->first;
+            w.template_pyramids = &it->second;
+            works.push_back(w);
         }
     }
+    else{
+        for (int i = 0; i < (int)class_ids.size(); ++i){
+            TemplatesMap::const_iterator it = class_templates.find(class_ids[i]);
+            if (it != class_templates.end()){
+                ClassWork w;
+                w.class_id = it->first;
+                w.template_pyramids = &it->second;
+                works.push_back(w);
+            }
+        }
+    }
+    for (size_t i = 0; i < works.size(); ++i)
+        collectCoarseCandidates(lm_pyramid, sizes, threshold, works[i].class_id,
+                                *works[i].template_pyramids, works[i].candidates);
+
+    // ---- 阶段 4: 逐层按候选覆盖的 tile 计算细层响应图。
+    // 只写活跃 tile, 其余位置保持 0; similarityLocal 只会读到矩形内的位置。
+    const bool use_roi = enable_roi_response_map && roi_response_map_enabled() && levels > 1;
+    for (int l = levels - 2; l >= 0; --l)
+    {
+        std::vector<cv::Rect> regions;
+        if (use_roi){
+            for (size_t w = 0; w < works.size(); ++w){
+                const ClassWork& work = works[w];
+                for (size_t tid = 0; tid < work.candidates.size(); ++tid)
+                    appendCandidateRegions(work.candidates[tid], levels - 1, l,
+                                           T_at_level, sizes[l],
+                                           (*work.template_pyramids)[tid][l], regions);
+            }
+        }
+        // 细层只写部分 tile, 先清零; 全图模式会写满, 清零同样安全。
+        for (int ori = 0; ori < 8; ++ori)
+            lm_pyramid[l][0][ori].setTo(0);
+
+        // 一个候选都没有时, 这一层的响应图完全用不上, 直接跳过流水线。
+        if (use_roi && regions.empty()) continue;
+
+        simple_fusion::ProcessManager manager(fusion_buffers, tileRows, tileCols);
+        manager.set_num_threads(num_threads_);
+        appendSuffixNodes(manager, mag_thresh_l2, T_at_level[l], sizes[l].width, lm_pyramid[l][0]);
+        if (use_roi){
+            manager.arrange(sizes[l].height, sizes[l].width, regions);
+            const int active = manager.num_update_rois();
+            const int total = manager.num_total_rois();
+            // 候选铺满全图时裁剪只剩额外开销, 退回整幅图计算。
+            const bool fallback = (active * 100 >= total * 85);
+            if (fallback)
+                manager.arrange(sizes[l].height, sizes[l].width);
+            if (roi_verbose())
+                std::cout << "[roi] level " << l << ": tiles " << active << "/" << total
+                          << " (" << (total ? active * 100 / total : 0) << "%), regions "
+                          << regions.size() << (fallback ? " -> full image" : "") << std::endl;
+        }else{
+            manager.arrange(sizes[l].height, sizes[l].width);
+        }
+        manager.process({sobel_a[l], sobel_b[l]}, lm_pyramid[l][0]);
+    }
+#ifdef DEBUG_MATCH_TIME
+    timer.out("construct refined response map");
+#endif
+
+    // ---- 阶段 5: 逐层局部精化并汇总结果
+    for (size_t i = 0; i < works.size(); ++i)
+        matchClass(lm_pyramid, sizes, threshold, matches, works[i].class_id,
+                   *works[i].template_pyramids, &works[i].candidates);
 
     // Sort matches by similarity, and prune any duplicates introduced by pyramid refinement
     std::sort(matches.begin(), matches.end());
@@ -1368,11 +1555,34 @@ struct MatchPredicate
     float threshold;
 };
 
+void Detector::collectCoarseCandidates(const LinearMemoryPyramid &lm_pyramid,
+                                       const std::vector<Size> &sizes,
+                                       float threshold,
+                                       const std::string &class_id,
+                                       const std::vector<TemplatePyramid> &template_pyramids,
+                                       std::vector<std::vector<Match>> &candidates_by_template) const
+{
+    candidates_by_template.assign(template_pyramids.size(), std::vector<Match>());
+    const std::vector<LinearMemories> &lowest_lm = lm_pyramid.back();
+    const int lowest_T = T_at_level.back();
+    const Size lowest_size = sizes.back();
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int template_id = 0; template_id < (int)template_pyramids.size(); ++template_id)
+    {
+        coarseCandidates(lowest_lm[0], template_pyramids[template_id].back(),
+                         lowest_size, lowest_T, threshold, class_id, template_id,
+                         candidates_by_template[template_id]);
+    }
+}
+
 void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                           const std::vector<Size> &sizes,
                           float threshold, std::vector<Match> &matches,
                           const std::string &class_id,
-                          const std::vector<TemplatePyramid> &template_pyramids) const
+                          const std::vector<TemplatePyramid> &template_pyramids,
+                          const std::vector<std::vector<Match>> *initial_candidates) const
 {
     // 注意: MSVC 的 OpenMP 2.0 不支持 declare reduction 自定义归约,
     // 这里用传统 parallel + 线程私有缓冲 + critical 汇总的方式收集结果
@@ -1387,50 +1597,19 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
     for (int template_id = 0; template_id < (int)template_pyramids.size(); ++template_id)
     {
         const TemplatePyramid &tp = template_pyramids[template_id];
-        // First match over the whole image at the lowest pyramid level
-        /// @todo Factor this out into separate function
-        const std::vector<LinearMemories> &lowest_lm = lm_pyramid.back();
 
         std::vector<Match> candidates;
+        if (initial_candidates)
         {
-            // Compute similarity maps for each ColorGradient at lowest pyramid level
-            Mat similarities;
-            int lowest_start = static_cast<int>(tp.size() - 1);
-            int lowest_T = T_at_level.back();
-            int num_features = 0;
-
-            {
-                const Template &templ = tp[lowest_start];
-                num_features += static_cast<int>(templ.features.size());
-
-                if (templ.features.size() < 64){
-                    similarity_64(lowest_lm[0], templ, similarities, sizes.back(), lowest_T);
-                    similarities.convertTo(similarities, CV_16U);
-                }else if (templ.features.size() < 8192){
-                    similarity(lowest_lm[0], templ, similarities, sizes.back(), lowest_T);
-                }else{
-                    CV_Error(Error::StsBadArg, "feature size too large");
-                }
-            }
-
-            // Find initial matches
-            for (int r = 0; r < similarities.rows; ++r)
-            {
-                ushort *row = similarities.ptr<ushort>(r);
-                for (int c = 0; c < similarities.cols; ++c)
-                {
-                    int raw_score = row[c];
-                    float score = (raw_score * 100.f) / (4 * num_features);
-
-                    if (score > threshold)
-                    {
-                        int offset = /*lowest_T / 2 + */(lowest_T % 2 - 1); // spread has no offset now
-                        int x = c * lowest_T + offset;
-                        int y = r * lowest_T + offset;
-                        candidates.push_back(Match(x, y, score, class_id, static_cast<int>(template_id)));
-                    }
-                }
-            }
+            // 候选已在构建细层响应图之前算好并缓存, 这里直接取用
+            candidates = (*initial_candidates)[template_id];
+        }
+        else
+        {
+            // 兼容路径: 没有预缓存时自己跑一次最粗层全图粗搜
+            const std::vector<LinearMemories> &lowest_lm = lm_pyramid.back();
+            coarseCandidates(lowest_lm[0], tp.back(), sizes.back(), T_at_level.back(),
+                             threshold, class_id, static_cast<int>(template_id), candidates);
         }
 
 

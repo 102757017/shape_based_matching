@@ -460,6 +460,9 @@ namespace line2Dup
         // ---- fusion 流水线相关(来自 fusion_fix_memo 分支) ----
         // true 时 match() 会在第 0 层额外输出 sobel 的 dx_/dy_(供 ICP 精修使用)
         bool set_produce_dxy = false;
+        // true(默认)时, 除最粗层外的响应图只在粗层候选邻域涉及的 tile 上计算。
+        // 置 false 可退回"每层全图算"的旧行为, 便于做 A/B 性能对比。
+        bool enable_roi_response_map = true;
         // fusion ProcessManager 的滚动缓冲区, 跨 match() 调用复用避免重复分配
         std::vector<std::vector<char>> fusion_buffers;
         // 响应图构建的梯度幅值阈值(来自构造时的 strong_thresh)
@@ -515,11 +518,22 @@ namespace line2Dup
         // Indexed as [pyramid level][ColorGradient][quantized label]
         typedef std::vector<std::vector<LinearMemories>> LinearMemoryPyramid;
 
+        // 只在最粗层做全图粗搜, 把每个模板的候选缓存下来。
+        // 候选需要在构建细层响应图之前就拿到, 因此从 matchClass 里提前了出来。
+        void collectCoarseCandidates(const LinearMemoryPyramid& lm_pyramid,
+            const std::vector<cv::Size>& sizes,
+            float threshold,
+            const std::string& class_id,
+            const std::vector<TemplatePyramid>& template_pyramids,
+            std::vector<std::vector<Match>>& candidates_by_template) const;
+
+        // initial_candidates 非空时跳过粗搜, 直接用预先缓存的候选做逐层精化。
         void matchClass(const LinearMemoryPyramid& lm_pyramid,
             const std::vector<cv::Size>& sizes,
             float threshold, std::vector<Match>& matches,
             const std::string& class_id,
-            const std::vector<TemplatePyramid>& template_pyramids) const;
+            const std::vector<TemplatePyramid>& template_pyramids,
+            const std::vector<std::vector<Match>>* initial_candidates = nullptr) const;
     };
 
 } // namespace line2Dup

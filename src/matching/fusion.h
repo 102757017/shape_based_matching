@@ -710,7 +710,13 @@ public:
                 *buf_ptr_1 = -*(parent_buf_ptr_1_) + *(parent_buf_ptr_1__);
             }
         }
-        cv::Rect dxy_roi(padded_col, padded_row, out_headers[2].cols, out_headers[2].rows);
+        // 本节点不在链尾时 out_headers[0] 带 halo, 沿用 padded_* 定位到 cur_roi,
+        // 与原来整条链逐位一致; 若它正是链尾(前缀链只算到 Sobel), out_headers[0]
+        // 就等于 cur_roi, 把起点夹到 0 避免 ROI 越界, 同时让 dx_/dy_ 与 sxy/syy
+        // 精确对齐(少了旧实现在 tile 边界上的 1 行错位, 对 ICP 结果无可测影响)。
+        const int roi_r = std::max(0, std::min(padded_row, out_headers[0].rows - out_headers[2].rows));
+        const int roi_c = std::max(0, std::min(padded_col, out_headers[0].cols - out_headers[2].cols));
+        cv::Rect dxy_roi(roi_c, roi_r, out_headers[2].cols, out_headers[2].rows);
         out_headers[0](dxy_roi).copyTo(out_headers[2]);
         out_headers[1](dxy_roi).copyTo(out_headers[3]);
     }
@@ -759,7 +765,9 @@ public:
                 *buf_ptr_1 = -*(parent_buf_ptr_1_) + *(parent_buf_ptr_1__);
             }
         }
-        cv::Rect dxy_roi(padded_col, padded_row, out_headers[2].cols, out_headers[2].rows);
+        const int roi_r = std::max(0, std::min(padded_row, out_headers[0].rows - out_headers[2].rows));
+        const int roi_c = std::max(0, std::min(padded_col, out_headers[0].cols - out_headers[2].cols));
+        cv::Rect dxy_roi(roi_c, roi_r, out_headers[2].cols, out_headers[2].rows);
         out_headers[0](dxy_roi).copyTo(out_headers[2]);
         out_headers[1](dxy_roi).copyTo(out_headers[3]);
     }
@@ -1468,7 +1476,11 @@ public:
         fusion_buffers_.clear();
     }
 
-    void arrange(int outRows, int outCols){
+    // active_regions 为空表示整幅图都算; 否则只保留与任一区域相交的 tile。
+    // tile 仍按全图网格划分(起点恒为 tileRows_/tileCols_ 的倍数), 因此
+    // linearizeTxT 依赖的 "cur_col % T == 0" 以及 pyrdown 依赖的偶数起点都不变。
+    void arrange(int outRows, int outCols,
+                 const std::vector<cv::Rect>& active_regions = std::vector<cv::Rect>()){
         if(nodes_.empty()){
             std::cout << "no nodes yet" << std::endl;
             return;
@@ -1500,6 +1512,33 @@ public:
                     update_rois_.push_back({cur_col, cur_row, outCols - cur_col, outRows - cur_row});
                 }
             }
+        }
+        total_rois_ = static_cast<int>(update_rois_.size());
+        if(!active_regions.empty()){
+            const int grid_rows = (outRows + tileRows_ - 1) / tileRows_;
+            const int grid_cols = (outCols + tileCols_ - 1) / tileCols_;
+            std::vector<unsigned char> tile_mask(size_t(grid_rows) * grid_cols, 0);
+            const cv::Rect image_rect(0, 0, outCols, outRows);
+            for(const cv::Rect& region : active_regions){
+                const cv::Rect clipped = region & image_rect;
+                if(clipped.empty()) continue;
+                const int r0 = clipped.y / tileRows_;
+                const int r1 = (clipped.y + clipped.height - 1) / tileRows_;
+                const int c0 = clipped.x / tileCols_;
+                const int c1 = (clipped.x + clipped.width - 1) / tileCols_;
+                for(int r = r0; r <= r1; ++r)
+                    for(int c = c0; c <= c1; ++c)
+                        tile_mask[size_t(r) * grid_cols + c] = 1;
+            }
+            std::vector<cv::Rect> kept;
+            kept.reserve(update_rois_.size());
+            for(const cv::Rect& tile : update_rois_){
+                const int r = tile.y / tileRows_;
+                const int c = tile.x / tileCols_;
+                if(r < grid_rows && c < grid_cols && tile_mask[size_t(r) * grid_cols + c])
+                    kept.push_back(tile);
+            }
+            update_rois_.swap(kept);
         }
         { // calculate paddings: IN(tileBuffer0) --Filter0-- tileBuffer1 --Filter1-- tileBuffer0 ...
             nodes_.back()->padded_row = nodes_.back()->op_row/2;
@@ -1709,6 +1748,8 @@ std::string omp_profile_str;
 #endif
 
     }
+    int num_update_rois() const { return static_cast<int>(update_rois_.size()); }
+    int num_total_rois() const { return total_rois_; }
     bool check_if_nodes_valid(){
         bool is_valid = true;
         for(int i=0; i<nodes_.size()-1; i++){
@@ -1725,6 +1766,7 @@ std::string omp_profile_str;
 
     std::vector<std::vector<char>>& fusion_buffers_;
     std::vector<cv::Rect> update_rois_;
+    int total_rois_ = 0;
     std::vector<std::shared_ptr<FilterNode>> nodes_;
     int tileRows_, tileCols_;
     int num_threads_ = 4;
