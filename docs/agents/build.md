@@ -83,3 +83,60 @@ scripts\smoke.bat
 
 > 注：它覆盖的是「demo 能编译并跑通自洽测试」这一基本回归；不覆盖 ICP 开关、
 > 训练参数等其它路径（见上面「本地偏离」与 `apps/matching/test.cpp` 的命令行参数）。
+
+## 七、性能剖析与调优开关
+
+匹配耗时几乎全部在 `Detector::match` 内部的"响应图构建"上（fusion 流水线，逐像素
+算梯度方向直方图 + 量化 + 线性化），模板相似度计算只占很小一部分。定位耗时时按下面
+的顺序开开关：
+
+```bat
+REM 1) 分层看：每层金字塔的响应图构建 vs 模板匹配的耗时
+cmake -S . -B build -DSBM_DEBUG_MATCH_TIME=ON
+REM 2) 再往下钻：fusion 每个算子、每个线程的耗时（输出噪声较大）
+cmake -S . -B build -DSBM_FUSION_PROFILE=ON
+```
+
+两个开关默认都是 `OFF`。关掉时既不打印，也不再为每次节点 update 取时间戳。
+
+测量本身要注意几点：
+
+- **用 `--repeat N` 取最小值。** 笔记本 CPU 有频率/温度波动，单次计时能差出 50%：
+  ```bat
+  shape_based_matching_test.exe --case case3 --data test/ --no-view --repeat 15
+  ```
+  输出里的 `match time: X ms (min of 15)` 才是可比的数。
+- **`SBM_FUSION_THREADS` 控制 fusion 的并行线程数**，默认取"逻辑核数 / 2"（即物理核数）。
+  想要更多并行（例如确认 SMT 是否有收益）可以临时覆盖：
+  ```bat
+  set SBM_FUSION_THREADS=8
+  ```
+  这个值原来写死是 4，在 6 核以上的机器上会浪费算力。
+
+## 八、本仓库已做过的性能优化（避免重复劳动 / 回退）
+
+在 `case3`（1766x883 场景图 + 69 个角度模板）上，下列改动把 `match()` 从约 33ms
+降到约 21ms（同一台机、`--repeat 15` 取最小值）：
+
+1. **`Hist3x3Node` 改为 SWAR 实现**：原来的 `votes_of_ori[8]` 动态下标只能落栈，
+   每像素 9 次读改写 + 扫 8 项；改成 8 个 4bit 计数器塞进一个 32 位字 + 查表累加，
+   单线程耗时 6.4ms → 1.4ms。该算子已用随机数据与原实现做过逐位等价性验证。
+2. **`copyToWith0Bound` 改为逐行 memcpy/memset**：原来逐像素判越界，而 level 0 的
+   输入常是 3 通道 BGR，这一步占了 Level-0 近 1/4 的时间。
+3. **fusion 线程数 4 → 物理核数**（见上）。流水线是纯 tile 并行，基本线性换算力。
+4. **fusion 的耗时打印改为编译期开关**：原来每次 `process()` 都无条件构造
+   stringstream + 打印，且每次节点 update 都取时间戳。
+
+试过但**没有收益**、别再重复的方向（都实测过）：
+
+- 把 `response1x1` 与 `linearizeTxT` 合并成一个算子：那 8 张中间响应图本来就在
+  tile 缓冲里、是缓存命中的，合并反而多了一次查表，实测略慢。
+- 改 `tileRows/tileCols`（32x256 → 64x256 / 64x512 / 96x384 / 128x256）：
+  差异在噪声范围内，结论是 halo 重复计算不是瓶颈。
+- 重排 `linearizeTxT` 的循环（按行相位一次读完，输入流量降到 1/T）：读写总量不变，
+  瓶颈在 1 字节散写造成的 cache line RFO，实测无改善。
+
+真正还能再降一档的路子（需要改算法结构，会动精度）：level 0（全分辨率）的响应图是
+为"在 level 1 候选点附近做 16x16 局部精化"服务的，而现在无论有没有候选都算了整幅图。
+若能只对候选点的并集外接矩形跑 level 0，或者干脆跳过 level 0（定位精度从 ±4px 退到
+±8px，靠 ICP 追回亚像素），可以再省掉现在的 16ms 里的大部分。

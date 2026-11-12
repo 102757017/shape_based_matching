@@ -2,6 +2,8 @@
 #include "icp.h"
 #include "geometry.h"
 #include <iostream>
+#include <thread>
+#include <cstdlib>
 #include "fusion.h"
 
 using namespace std;
@@ -1057,6 +1059,31 @@ static int least_mul_of_Ts(const std::vector<int>& T_at_level){
     return cur_res;
 }
 
+// 融合流水线的并行线程数。
+// 原来是写死的 4, 在本机(6 核 12 线程)上白白空转 1/3 的算力 —— 流水线是纯 tile 并行,
+// 线程数基本线性换算力。默认取"物理核数"(逻辑核数的一半), 环境变量
+// SBM_FUSION_THREADS 可以覆盖(调参/对比时用)。
+static int fusion_thread_num(){
+    static const int n = []() -> int {
+        char* env = nullptr;
+#ifdef _MSC_VER
+        size_t len = 0;
+        if(_dupenv_s(&env, &len, "SBM_FUSION_THREADS") != 0) env = nullptr;
+#else
+        env = std::getenv("SBM_FUSION_THREADS");
+#endif
+        if(env){
+            int v = std::atoi(env);
+            std::free(env);
+            if(v > 0) return v;
+        }
+        unsigned hw = std::thread::hardware_concurrency();
+        int phys = (hw >= 2) ? static_cast<int>(hw / 2) : static_cast<int>(hw);
+        return std::max(1, phys);
+    }();
+    return n;
+}
+
 std::vector<Match> Detector::match(Mat source, float threshold, const std::vector<string> &class_ids, const Mat mask)
 {
     dx_ = cv::Mat();
@@ -1082,7 +1109,7 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
 
     const int tileRows = 32;
     const int tileCols = 256;
-    const int num_threads_ = 4;
+    const int num_threads_ = fusion_thread_num();
 
     const int32_t mag_thresh_l2 = int32_t(res_map_mag_thresh*res_map_mag_thresh);
 

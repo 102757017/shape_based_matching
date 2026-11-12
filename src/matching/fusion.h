@@ -11,10 +11,23 @@
 #include <stdlib.h>
 #include <thread>
 #include <sstream>
+#include <cstring>
+#include <algorithm>
 #include "mipp.h"  // for SIMD in different platforms
+
+// 1 = 打印 fusion 每个节点/每个线程的耗时(调试用), 0 = 关闭。
+// 关闭后既不打印, 也不再为每次 update() 取时间戳。
+// 也可用 cmake -DSBM_FUSION_PROFILE=ON 全局打开。
+#ifndef SBM_FUSION_PROFILE
+#define SBM_FUSION_PROFILE 0
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
+#endif
+
+#ifdef _MSC_VER
+#include <intrin.h>   // _BitScanForward(hist3x3 的 SWAR 版本用)
 #endif
 namespace simple_fusion {
 
@@ -104,12 +117,16 @@ public:
     virtual void update_simple(int start_r, int start_c, int end_r, int end_c) = 0;
     virtual void update_simd(int start_r, int start_c, int end_r, int end_c) = 0;
     void update(){
+#if SBM_FUSION_PROFILE
         SimpleTimer timer;
+#endif
         if(use_simd)
             update_simd(op_row/2, op_col/2, in_headers[0].rows - op_row/2, in_headers[0].cols - op_col/2);
         else
             update_simple(op_row/2, op_col/2, in_headers[0].rows - op_row/2, in_headers[0].cols - op_col/2);
+#if SBM_FUSION_PROFILE
         elapsed_time += timer.elapsed();
+#endif
     }
 
     virtual std::shared_ptr<FilterNode> clone() const = 0;
@@ -1076,44 +1093,49 @@ public:
     const int32_t TG7875 = static_cast<int32_t>(std::round(std::tan(78.75/180*CV_PI)*(1<<15)));
 };
 
+// 取最低位 1 的下标(0..31), 供 hist3x3 的 SWAR 版本用
+inline int ctz32(uint32_t v){
+#ifdef _MSC_VER
+    unsigned long idx;
+    _BitScanForward(&idx, v);
+    return static_cast<int>(idx);
+#else
+    return __builtin_ctz(v);
+#endif
+}
+
 class Hist3x3Node_8U_8U : public FilterNode {
 public:
     Hist3x3Node_8U_8U() : FilterNode("hist3x3", CV_8U, 1, CV_8U, 1, 3, 3){}
+
+    // 3x3 邻域里各方向标签的众数: 9 个邻居投票, 票数过半(NEIGHBOR_THRESHOLD=5)的那个方向胜出。
+    //
+    // 原来的写法是 votes_of_ori[8] 数组 + 逐项扫描, 动态下标让数组只能落在栈上,
+    // 每个像素 9 次"读-改-写"栈内存再扫 8 项, 是整个融合流水线最贵的一步。
+    //
+    // 这里改成 SWAR: 8 个计数器各占 32 位字里的一个 4bit 半字节,
+    //   - 用一张 64 项的查表把"标签 -> 该半字节 +1"变成一次 L1 读 + 一次加法;
+    //   - 票数上限 9 (< 2^4), 不会溢出半字节;
+    //   - 判断"某方向 >= 5 票": 每个半字节加 3, 最高位被置起 <=> 原值 >= 5;
+    //   - 9 票里不可能有两个方向同时 >= 5, 所以掩码里只会有 1 位, 直接 ctz 取方向。
     void update_simple(int start_r, int start_c, int end_r, int end_c) override {
 
         for(int r = start_r; r < end_r; r++){
             int c = start_c;
-            uint8_t *parent_buf_ptr = in_headers[0].ptr<uint8_t>(r, c);
-            uint8_t *parent_buf_ptr_ = in_headers[0].ptr<uint8_t>(r-1, c);
-            uint8_t *parent_buf_ptr__ = in_headers[0].ptr<uint8_t>(r+1, c);
+            const uint8_t *p_up = in_headers[0].ptr<uint8_t>(r - 1, c);
+            const uint8_t *p_md = in_headers[0].ptr<uint8_t>(r,     c);
+            const uint8_t *p_dn = in_headers[0].ptr<uint8_t>(r + 1, c);
 
             uint8_t *buf_ptr = out_headers[0].ptr<uint8_t>(r - op_row/2, c - op_col/2);
-            for(; c < end_c; c++, buf_ptr++, parent_buf_ptr++, parent_buf_ptr_++, parent_buf_ptr__++){
+            for(; c < end_c; c++, buf_ptr++, p_up++, p_md++, p_dn++){
 
-                uint8_t votes_of_ori[8] = {0};
-                if(*parent_buf_ptr != INVALID) votes_of_ori[*parent_buf_ptr]++;
-                if(*(parent_buf_ptr+1) != INVALID) votes_of_ori[*(parent_buf_ptr+1)]++;
-                if(*(parent_buf_ptr-1) != INVALID) votes_of_ori[*(parent_buf_ptr-1)]++;
-                if(*(parent_buf_ptr_) != INVALID) votes_of_ori[*(parent_buf_ptr_)]++;
-                if(*(parent_buf_ptr_+1) != INVALID) votes_of_ori[*(parent_buf_ptr_+1)]++;
-                if(*(parent_buf_ptr_-1) != INVALID) votes_of_ori[*(parent_buf_ptr_-1)]++;
-                if(*(parent_buf_ptr__) != INVALID) votes_of_ori[*(parent_buf_ptr__)]++;
-                if(*(parent_buf_ptr__+1) != INVALID) votes_of_ori[*(parent_buf_ptr__+1)]++;
-                if(*(parent_buf_ptr__-1) != INVALID) votes_of_ori[*(parent_buf_ptr__-1)]++;
+                uint32_t acc = inc_[p_up[-1]] + inc_[p_up[0]] + inc_[p_up[1]]
+                             + inc_[p_md[-1]] + inc_[p_md[0]] + inc_[p_md[1]]
+                             + inc_[p_dn[-1]] + inc_[p_dn[0]] + inc_[p_dn[1]];
 
-                // Find bin with the most votes from the patch
-                int max_votes = 0;
-                uint8_t index = 0;
-                for (uint8_t i = 0; i < 8; ++i){
-                    if (max_votes < votes_of_ori[i]){
-                        index = i;
-                        max_votes = votes_of_ori[i];
-                    }
-                }
-
-                // Only accept the quantization if majority of pixels in the patch agree
-                if (max_votes >= NEIGHBOR_THRESHOLD) *buf_ptr = uint8_t(uint8_t(1) << index);
-                else *buf_ptr = 0;
+                // 每个半字节 +3 后看 bit3: 计数 >= 5 即置位(计数 <= 9, 加 3 不会进位到相邻半字节)
+                const uint32_t hit = (acc + 0x33333333u) & 0x88888888u;
+                *buf_ptr = hit ? uint8_t(uint8_t(1) << (ctz32(hit) >> 2)) : uint8_t(0);
             }
         }
     }
@@ -1128,6 +1150,23 @@ public:
         return node_new;
     }
     const int NEIGHBOR_THRESHOLD = 5;
+
+private:
+    // inc_[label] = 1 << (label*4), 即"把第 label 个半字节加 1";
+    // 标签 0..7 有效, INVALID(63) 及其它值 -> 0(不投票)。
+    // 表做成 256 项, 即使上游送出意料之外的字节也不会越界读。
+    struct IncTable {
+        uint32_t v[256];
+        IncTable(){
+            for(int i = 0; i < 256; i++) v[i] = 0;
+            for(int i = 0; i < 8; i++)   v[i] = uint32_t(1) << (4 * i);
+        }
+    };
+    static const uint32_t* inc_table(){
+        static const IncTable t;
+        return t.v;
+    }
+    const uint32_t *inc_ = inc_table();
 };
 
 class Spread1xnNode_8U_8U : public FilterNode {
@@ -1499,19 +1538,27 @@ public:
         }
     }
 
+    // 把 in 的 roi 区域拷到 out 的 (rr_ori, cc_ori) 起点, 越界处补 0。
+    // 逐行处理: 行内合法段用 memcpy, 两侧补 0 用 memset —— 比"逐像素判越界"快一个数量级
+    // (level 0 输入常是 3 通道 BGR, 逐像素版本占掉了整条流水线近 1/4 的时间)。
     template<typename T>
     void copyToWith0Bound(const cv::Mat& in, cv::Mat& out, const cv::Rect& roi, int rr_ori, int cc_ori){
-        for(int r=roi.y, rr=rr_ori; r<roi.y + roi.height; r++, rr++){
-            T* out_ptr = out.ptr<T>(rr);
-            for(int c=roi.x, cc=cc_ori; c<roi.x + roi.width; c++, cc++){
-                if(r<0 || r>=in.rows || c<0 || c>=in.cols){
-                    out_ptr[cc] = 0;
-                    continue;
-                }else{
-                    const T* in_ptr = in.ptr<T>(r);
-                    out_ptr[cc] = in_ptr[c];
-                }
+        const size_t elem = sizeof(T);
+        // 目标列区间 [cc_ori, cc_ori + roi.width) 与源列区间 [roi.x, roi.x + roi.width) 一一对应
+        const int c_lo = std::max(0, -roi.x);                        // 段内第一个合法列(相对)
+        const int c_hi = std::min(roi.width, in.cols - roi.x);       // 段内最后一个合法列+1(相对)
+
+        for(int rr = 0; rr < roi.height; ++rr){
+            T* out_ptr = out.ptr<T>(rr + rr_ori) + cc_ori;
+            const int r = roi.y + rr;
+            if(r < 0 || r >= in.rows){
+                memset(out_ptr, 0, size_t(roi.width) * elem);
+                continue;
             }
+            if(c_lo > 0) memset(out_ptr, 0, size_t(c_lo) * elem);
+            if(c_hi > c_lo)
+                memcpy(out_ptr + c_lo, in.ptr<T>(r) + (roi.x + c_lo), size_t(c_hi - c_lo) * elem);
+            if(c_hi < roi.width) memset(out_ptr + c_hi, 0, size_t(roi.width - c_hi) * elem);
         }
     }
 
@@ -1533,7 +1580,9 @@ public:
     assert(nodes_.back()->output_num == out_v.size() &&
            nodes_.back()->output_type == out_v[0].type() && "last node is not compatible");
 
+#if SBM_FUSION_PROFILE
 std::string omp_profile_str;
+#endif
 #ifdef _OPENMP
 #pragma omp parallel num_threads(num_threads_)
     {
@@ -1633,6 +1682,7 @@ std::string omp_profile_str;
         for(int i=0; i<nodes_private.size(); i++) nodes_private[i]->update();
     }
 
+#if SBM_FUSION_PROFILE
     std::stringstream ss;
     ss << "----------thread " << std::this_thread::get_id() << "---------\n";
     for(auto& n: nodes_private){
@@ -1648,12 +1698,15 @@ std::string omp_profile_str;
 #ifdef _OPENMP
     }
 #endif
+#endif  // SBM_FUSION_PROFILE
 
 #ifdef _OPENMP
     }
 #endif
 
+#if SBM_FUSION_PROFILE
     std::cout << omp_profile_str << std::endl;
+#endif
 
     }
     bool check_if_nodes_valid(){

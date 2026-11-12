@@ -139,7 +139,8 @@ void angle_test(const std::string& mode, bool viewICP,
                 float angleStep = 1.f,
                 const std::vector<int>& pyramidT = {4, 8},
                 int numFeatures = 128,
-                float weakThresh = 30.f, float strongThresh = 60.f){
+                float weakThresh = 30.f, float strongThresh = 60.f,
+                int repeat = 1){
     line2Dup::Detector detector(numFeatures, pyramidT, weakThresh, strongThresh);
     detector.set_produce_dxy = true;  // 让 match() 输出 dx_/dy_ 供后续 ICP 精修使用
 
@@ -213,9 +214,19 @@ void angle_test(const std::string& mode, bool viewICP,
 
         std::cout << "test img size: " << img.rows * img.cols << std::endl << std::endl;
 
-        Timer timer;
-        auto matches = detector.match(img, 90, ids);
-        timer.out();
+        // 只统计 detector.match 本体; --repeat > 1 时取多次的最小值,
+        // 避开 CPU 频率波动/调度抖动带来的噪声(测性能时建议 --repeat 10)
+        std::vector<line2Dup::Match> matches;
+        double best_ms = 1e9;
+        for(int rep = 0; rep < std::max(1, repeat); rep++){
+            Timer timer;
+            auto ms_rep = detector.match(img, 90, ids);
+            double ms = timer.elapsed() * 1000.0;
+            if(ms < best_ms){ best_ms = ms; matches.swap(ms_rep); }
+        }
+        std::cout << "match time: " << best_ms << " ms"
+                  << (repeat > 1 ? (" (min of " + std::to_string(repeat) + ")") : "")
+                  << std::endl << std::endl;
 
 
         std::cout << "matches.size(): " << matches.size() << std::endl;
@@ -400,6 +411,7 @@ static void printUsage(){
         << "  --class <id>         类别 id (默认 test)\n"
         << "  --view               显示 ICP 可视化 (默认即显示，可省略)\n"
         << "  --no-view            不显示 ICP 可视化 (避免 waitKey 阻塞)\n"
+        << "  --repeat n           test 模式重复匹配 n 次, 报告最小值 (测性能用, 默认 1)\n"
         << "  --help               显示本帮助\n";
 }
 
@@ -425,6 +437,7 @@ int main(int argc, char** argv){
     std::vector<int> pyramidT = {4, 8};
     int numFeatures = 128;
     float weakThresh = 30.f, strongThresh = 60.f;
+    int repeat = 1;
 
     for(int i = 1; i < nargs; i++){
         std::string a = args[i];
@@ -455,6 +468,7 @@ int main(int argc, char** argv){
         else if(a == "--num-features") numFeatures = std::stoi(nextArg());
         else if(a == "--weak")         weakThresh = std::stof(nextArg());
         else if(a == "--strong")       strongThresh = std::stof(nextArg());
+        else if(a == "--repeat")       repeat = std::stoi(nextArg());
         else if(a == "--help" || a == "-h"){ printUsage(); return 0; }
         else { std::cerr << "未知参数: " << a << "\n"; printUsage(); return 1; }
     }
@@ -470,6 +484,6 @@ int main(int argc, char** argv){
 
     MIPP_test();
     angle_test(mode, viewICP, dataDir, caseName, sceneImg, trainImg, trainRoi, classId,
-               angleRange, angleStep, pyramidT, numFeatures, weakThresh, strongThresh);
+               angleRange, angleStep, pyramidT, numFeatures, weakThresh, strongThresh, repeat);
     return 0;
 }

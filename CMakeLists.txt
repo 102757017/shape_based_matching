@@ -152,8 +152,19 @@ endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-# 如果希望显示匹配时间，取消注释下面的行
-# add_definitions(-DDEBUG_MATCH_TIME)
+# 匹配/融合流水线的耗时统计开关(默认关闭):
+#   cmake -DSBM_DEBUG_MATCH_TIME=ON .. 后, Detector::match 会打印
+#   "fusion time"(每层响应图构建) 与 "match time"(模板相似度计算) 的耗时
+option(SBM_DEBUG_MATCH_TIME "Print per-stage timing inside Detector::match" OFF)
+if(SBM_DEBUG_MATCH_TIME)
+    add_definitions(-DDEBUG_MATCH_TIME)
+endif()
+
+# 融合流水线每个算子/每个线程的耗时统计(噪声大, 只在深挖性能时打开)
+option(SBM_FUSION_PROFILE "Print per-node timing inside the fusion pipeline" OFF)
+if(SBM_FUSION_PROFILE)
+    add_definitions(-DSBM_FUSION_PROFILE=1)
+endif()
 
 # 添加 OpenMP 包查找
 find_package(OpenMP)
