@@ -142,7 +142,15 @@ TrainResult MatcherCore::train(const cv::Mat& train_image, const std::vector<int
     // ---------- 3. padding + 基础掩码 ----------
     double diagonal = std::sqrt(static_cast<double>(w) * w + static_cast<double>(h) * h);
     double max_scale = static_cast<double>(params.scale_end);
-    int padding = static_cast<int>(diagonal * max_scale * 1.5) + 50;
+    // 优化: padding 只需容下"ROI 绕自身中心旋转/缩放后的扫掠包围盒"。
+    // 旋转 w x h 矩形的扫掠最大包围盒是 diagonal x diagonal(45 度时),
+    // 故 padding = (diagonal*max_scale - min(w,h)) / 2 + 余量即可;
+    // 原公式 diagonal*1.5 对扁长 ROI(如 1360x460)会开出 28MP 的 padded 图,
+    // 内存峰值 ~1GB+, 训练特征提取耗时也随面积线性暴涨(实测可差 5 倍以上)。
+    // 特征只取自 ROI 矩形内(mask 限定), padded 区全零, 因此只要 padding 大于
+    // 高斯核半径, 模板特征与旧公式逐位一致。
+    int padding = static_cast<int>(
+        std::ceil((diagonal * max_scale - std::min(w, h)) * 0.5)) + 60;
     int padded_w = w + 2 * padding, padded_h = h + 2 * padding;
 
     cv::Mat padded_img = cv::Mat::zeros(padded_h, padded_w, roi_image.type());

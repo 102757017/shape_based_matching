@@ -11,6 +11,8 @@
 #include <functional>
 #include "mipp.h"  // for SIMD in different platforms
 
+#include "../cuda_icp/scene/kdtree_scene/kdtree_scene.h"  // refine() 的场景缓存需要 Scene_kdtree/KDTree_cpu 完整类型
+
 #include <chrono>
 class Timer
 {
@@ -482,6 +484,13 @@ namespace line2Dup
 
         cv::Mat dx_, dy_; // dx dy recorded for icp
 
+        // ---- ICP 场景缓存(优化): dx_/dy_ 不变时, 边缘点云 + KD-tree 只建一次。
+        // 注意: Detector 本身非线程安全(fusion_buffers 等成员已共享), 缓存同样如此。
+        ::Scene_kdtree scene_cache_;
+        ::KDTree_cpu kdtree_cache_;
+        cv::Mat scene_cache_dx_, scene_cache_dy_;
+        bool scene_cache_valid_ = false;
+
         /**
          * \brief 对单个 match 做 ICP 精修(手动版)
          *
@@ -517,6 +526,12 @@ namespace line2Dup
         typedef std::vector<cv::Mat> LinearMemories;
         // Indexed as [pyramid level][ColorGradient][quantized label]
         typedef std::vector<std::vector<LinearMemories>> LinearMemoryPyramid;
+
+        // ---- 跨帧缓冲池(优化): match() 每帧原本都要重新分配响应图/中间结果,
+        // 同尺寸连续视频流下 create() 是 no-op, 直接复用, 省掉每帧 ~10MB 的堆分配。
+        // 注意: Detector 非线程安全(与 fusion_buffers 同理), 单实例串行使用。
+        std::vector<std::vector<LinearMemories>> lm_pool_;   // [level][0][ori]
+        std::vector<cv::Mat> sobel_pool_a_, sobel_pool_b_, pyrdown_pool_, dxy_pool_;
 
         // 只在最粗层做全图粗搜, 把每个模板的候选缓存下来。
         // 候选需要在构建细层响应图之前就拿到, 因此从 matchClass 里提前了出来。

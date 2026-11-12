@@ -1,0 +1,32 @@
+{
+  "class_id": "test",
+  "save_dir": "bench_out_c1",
+  "train": {
+    "image": "test/case1/train.png",
+    "roi": [
+      130,
+      110,
+      270,
+      270
+    ],
+    "feature_num": 128,
+    "pyramid_levels": [
+      4,
+      8
+    ],
+    "weak_thresh": 30,
+    "strong_thresh": 60,
+    "angle_start": 0,
+    "angle_extent": 360,
+    "angle_step": 1
+  },
+  "match": {
+    "scene": "test/case1/test.png",
+    "score_threshold": 90,
+    "use_nms": true,
+    "nms_threshold": 0.5,
+    "max_matches": 5,
+    "use_refine": true,
+    "min_fitness": 0.3
+  }
+}

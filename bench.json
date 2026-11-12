@@ -1,0 +1,28 @@
+{
+  "class_id": "part",
+  "save_dir": "bench_out",
+  "train": {
+    "image": "test/case3/train.png",
+    "roi": [280, 190, 1360, 460],
+    "feature_num": 128,
+    "pyramid_levels": [4, 8],
+    "weak_thresh": 30,
+    "strong_thresh": 60,
+    "angle_start": 0,
+    "angle_extent": 360,
+    "angle_step": 1,
+    "scale_start": 1.0,
+    "scale_end": 1.0,
+    "scale_step": 0.5
+  },
+  "match": {
+    "scene": "test/case3/test.png",
+    "score_threshold": 90,
+    "use_nms": true,
+    "nms_threshold": 0.5,
+    "max_matches": 5,
+    "use_refine": true,
+    "min_fitness": 0.3,
+    "max_overlap": 1.0
+  }
+}

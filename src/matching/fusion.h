@@ -1602,6 +1602,9 @@ public:
     }
 
     void process(const std::vector<cv::Mat>& in_v, const std::vector<cv::Mat>& out_v){
+    {static const bool trace = std::getenv("SBM_FUSION_TRACE")!=nullptr;
+     if(trace) fprintf(stderr, "[trace] process enter: rois=%d buffers=%zu footprint=%d threads=%d\n",
+         (int)update_rois_.size(), fusion_buffers_.size(), maxMemoFootprint_, num_threads_);}
 
     // sanity check
     assert(!in_v.empty() && "empty input");
@@ -1638,7 +1641,11 @@ std::string omp_profile_str;
     filter_buffer[0] = buffer_0 + aligned256_after_n_char(buffer_0);
     filter_buffer[1] = buffer_1 + aligned256_after_n_char(buffer_1);
 
+    {static const bool trace = std::getenv("SBM_FUSION_TRACE")!=nullptr;
+     if(trace) fprintf(stderr, "[trace] tid=%d buffers ready, nodes=%d\n", tid, (int)nodes_.size());}
     auto nodes_private = deep_copy_shared_ptr_vec(nodes_);
+    {static const bool trace = std::getenv("SBM_FUSION_TRACE")!=nullptr;
+     if(trace) fprintf(stderr, "[trace] tid=%d nodes cloned\n", tid);}
 
 #ifdef _OPENMP
 #pragma omp for nowait
@@ -1718,7 +1725,15 @@ std::string omp_profile_str;
         }
 
         // update one by one
-        for(int i=0; i<nodes_private.size(); i++) nodes_private[i]->update();
+        {static const bool trace = std::getenv("SBM_FUSION_TRACE")!=nullptr;
+         if(trace) fprintf(stderr, "[trace] tid=%d tile(%d,%d %dx%d) node0/%d\n",
+             tid, cur_roi.x, cur_roi.y, cur_roi.width, cur_roi.height, (int)nodes_private.size());}
+        for(int i=0; i<nodes_private.size(); i++){ 
+            {static const bool trace = std::getenv("SBM_FUSION_TRACE")!=nullptr;
+             if(trace) fprintf(stderr, "[trace] tid=%d tile(%d,%d) node %d %s\n",
+                 tid, cur_roi.x, cur_roi.y, i, nodes_private[i]->op_name.c_str());}
+            nodes_private[i]->update();
+        }
     }
 
 #if SBM_FUSION_PROFILE

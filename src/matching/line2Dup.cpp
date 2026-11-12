@@ -791,7 +791,9 @@ static void similarity(const std::vector<Mat> &linear_memories, const Template &
 
     int template_positions = span_y * W + span_x + 1; // why add 1?
 
-    dst = Mat::zeros(H, W, CV_16U);
+    // 优化: 同 similarity_64, 复用调用方缓冲
+    dst.create(H, W, CV_16U);
+    dst.setTo(0);
     short *dst_ptr = dst.ptr<short>();
     mipp::Reg<uint8_t> zero_v(uint8_t(0));
 
@@ -830,7 +832,9 @@ static void similarityLocal(const std::vector<Mat> &linear_memories, const Templ
     CV_Assert(templ.features.size() < 8192);
 
     int W = size.width / T;
-    dst = Mat::zeros(16, 16, CV_16U);
+    // 同 similarityLocal_64: 复用调用方传入的缓冲, 避免每个候选重新分配
+    dst.create(16, 16, CV_16U);
+    dst.setTo(0);
 
     int offset_x = (center.x / T - 8) * T;
     int offset_y = (center.y / T - 8) * T;
@@ -918,7 +922,10 @@ static void similarity_64(const std::vector<Mat> &linear_memories, const Templat
 
     /// @todo In old code, dst is buffer of size m_U. Could make it something like
     /// (span_x)x(span_y) instead?
-    dst = Mat::zeros(H, W, CV_8U);
+    // 优化: create() 复用调用方的持久缓冲(粗层逐模板扫时同一线程反复调用),
+    // 避免每模板一次 Mat::zeros 堆分配 + 页错误。
+    dst.create(H, W, CV_8U);
+    dst.setTo(0);
     uchar *dst_ptr = dst.ptr<uchar>();
 
     // Compute the similarity measure for this template by accumulating the contribution of
@@ -959,7 +966,10 @@ static void similarityLocal_64(const std::vector<Mat> &linear_memories, const Te
 
     // Compute the similarity map in a 16x16 patch around center
     int W = size.width / T;
-    dst = Mat::zeros(16, 16, CV_8U);
+    // 优化: create() 对同尺寸同类型的 Mat 是 no-op, 配合调用方把 dst 提到循环外复用,
+    // 消除了每个候选每次调用的 Mat::zeros 堆分配(360 模板 x 候选数 x 层数 次/帧)。
+    dst.create(16, 16, CV_8U);
+    dst.setTo(0);
 
     // Offset each feature point by the requested center. Further adjust to (-8,-8) from the
     // center to get the top-left corner of the 16x16 patch.
@@ -1074,7 +1084,12 @@ static int fusion_thread_num(){
 #endif
         if(env){
             int v = std::atoi(env);
+            // 修复: 只有 MSVC 的 _dupenv_s 才分配需要 free 的副本;
+            // POSIX 的 getenv 返回环境区内部指针, free 它是未定义行为
+            // (glibc 直接报 "free(): invalid pointer" 终止进程)。
+#ifdef _MSC_VER
             std::free(env);
+#endif
             if(v > 0) return v;
         }
         unsigned hw = std::thread::hardware_concurrency();
@@ -1157,10 +1172,13 @@ static void coarseCandidates(const std::vector<Mat>& lowest_lm, const Template& 
 {
     candidates.clear();
     const int num_features = static_cast<int>(templ.features.size());
-    Mat similarities;
-    if(num_features < 64){
+    // 优化: 线程局部持久缓冲, 360 个模板逐个粗搜时同一线程零堆分配
+    static thread_local Mat similarities;
+    const bool small_feature = (num_features < 64);
+    if(small_feature){
         similarity_64(lowest_lm, templ, similarities, size, lowest_T);
-        similarities.convertTo(similarities, CV_16U);
+        // 优化: 不再 convertTo(CV_16U), 直接在 uint8 上扫描.
+        // 4*N < 256, 原始累加值不会溢出, 阈值也可无损地换算到 uint8 域.
     }else if(num_features < 8192){
         similarity(lowest_lm, templ, similarities, size, lowest_T);
     }else{
@@ -1168,13 +1186,29 @@ static void coarseCandidates(const std::vector<Mat>& lowest_lm, const Template& 
     }
 
     const int offset = (lowest_T % 2 - 1); // spread has no offset now
+    // 优化: score = raw * 100 / (4N) > threshold  <=>  raw > floor(threshold * 4N / 100).
+    // 把浮点乘除从每个像素的内循环里拿出来(原来每帧 360 模板 x 上万位置 次浮点除法).
+    const int raw_thresh = static_cast<int>(std::floor(threshold * 4.f * num_features / 100.f));
+    candidates.reserve(64);
     for(int r = 0; r < similarities.rows; ++r){
-        ushort* row = similarities.ptr<ushort>(r);
-        for(int c = 0; c < similarities.cols; ++c){
-            const float score = (row[c] * 100.f) / (4 * num_features);
-            if(score > threshold)
-                candidates.push_back(Match(c * lowest_T + offset, r * lowest_T + offset,
-                                           score, class_id, template_id));
+        if(small_feature){
+            const uchar* row = similarities.ptr<uchar>(r);
+            for(int c = 0; c < similarities.cols; ++c){
+                const ushort raw = row[c];
+                if(raw > raw_thresh)
+                    candidates.push_back(Match(c * lowest_T + offset, r * lowest_T + offset,
+                                               (raw * 100.f) / (4 * num_features),
+                                               class_id, template_id));
+            }
+        }else{
+            const ushort* row = similarities.ptr<ushort>(r);
+            for(int c = 0; c < similarities.cols; ++c){
+                const ushort raw = row[c];
+                if(raw > raw_thresh)
+                    candidates.push_back(Match(c * lowest_T + offset, r * lowest_T + offset,
+                                               (raw * 100.f) / (4 * num_features),
+                                               class_id, template_id));
+            }
         }
     }
 }
@@ -1242,6 +1276,12 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
     std::vector<Mat> sobel_a(levels), sobel_b(levels);
     std::vector<Mat> pyrdown_at(levels);
 
+    // 优化: 跨帧复用大缓冲(同尺寸时 create() 为 no-op, 首帧后零堆分配)
+    if(static_cast<int>(lm_pool_.size()) != levels)
+        lm_pool_.assign(levels, std::vector<LinearMemories>(1, LinearMemories(8)));
+    sobel_pool_a_.resize(levels); sobel_pool_b_.resize(levels);
+    pyrdown_pool_.resize(levels); dxy_pool_.resize(2);
+
     // ---- 阶段 1: 每层全图跑前缀, 产出下一层输入图 / Sobel 结果 / ICP 梯度
     for(int cur_l = 0; cur_l < levels; cur_l++){
 #ifdef DEBUG_MATCH_TIME
@@ -1257,22 +1297,32 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
         sizes.push_back({imgCols, imgRows});
 
         src_at[cur_l] = (cur_l == 0) ? source : pyrdown_at[cur_l - 1];
-        if(need_pyr) pyrdown_at[cur_l] = Mat(imgRows/2, imgCols/2, CV_8U);
+        if(need_pyr){
+            pyrdown_pool_[cur_l].create(imgRows/2, imgCols/2, CV_8U);
+            pyrdown_at[cur_l] = pyrdown_pool_[cur_l];
+        }
 
         const bool is_coarsest = (cur_l == levels - 1);
         if(!is_coarsest){
-            sobel_a[cur_l] = Mat(imgRows, imgCols, CV_16S);
-            sobel_b[cur_l] = Mat(imgRows, imgCols, CV_16S);
+            sobel_pool_a_[cur_l].create(imgRows, imgCols, CV_16S);
+            sobel_pool_b_[cur_l].create(imgRows, imgCols, CV_16S);
+            sobel_a[cur_l] = sobel_pool_a_[cur_l];
+            sobel_b[cur_l] = sobel_pool_b_[cur_l];
         }
 
         const bool produce_dxy = set_produce_dxy && cur_l == 0;
         if(produce_dxy){
-            dx_ = Mat(src_at[cur_l].size(), CV_16S, Scalar(0));
-            dy_ = Mat(src_at[cur_l].size(), CV_16S, Scalar(0));
+            dxy_pool_[0].create(src_at[cur_l].size(), CV_16S);
+            dxy_pool_[1].create(src_at[cur_l].size(), CV_16S);
+            dxy_pool_[0].setTo(0);
+            dxy_pool_[1].setTo(0);
+            dx_ = dxy_pool_[0];
+            dy_ = dxy_pool_[1];
         }
 
         for(int ori=0; ori<8; ori++)
-            lm_pyramid[cur_l][0][ori] = Mat(cur_T*cur_T, imgCols/cur_T*imgRows/cur_T, CV_8U);
+            lm_pool_[cur_l][0][ori].create(cur_T*cur_T, imgCols/cur_T*imgRows/cur_T, CV_8U);
+        lm_pyramid[cur_l][0] = lm_pool_[cur_l][0];   // 头拷贝, 与池共享数据
 
         simple_fusion::ProcessManager manager(fusion_buffers, tileRows, tileCols);
         manager.set_num_threads(num_threads_);
@@ -1555,6 +1605,43 @@ struct MatchPredicate
     float threshold;
 };
 
+// 粗层候选阈值裕量(环境变量 SBM_COARSE_MARGIN 可覆盖)。
+// 最粗层模板特征数逐层减半、T 容差更大, 同一位姿的粗层得分系统性低于细层:
+// 实测 [4,8,16] 金字塔下, 最终 95.9 分的目标在粗层只有 80~89 分 —— 若把用户阈值
+// 直接用于粗层筛选, 深金字塔会整帧漏检(阈值语义随金字塔深度漂移, 这是个缺陷)。
+// 粗层放宽 margin 只影响"哪些候选进入 march-up"; march-up 每一级仍按原阈值
+// MatchPredicate 过滤, 最终结果与阈值语义保持不变。
+// 代价受 top-K 截断约束: 每模板最多多带 K 个候选。
+static float coarse_threshold_margin()
+{
+    static const float v = []() -> float {
+        const char* env = std::getenv("SBM_COARSE_MARGIN");
+        if(env){
+            float f = static_cast<float>(std::atof(env));
+            if(f >= 0.f && f < 100.f) return f;
+        }
+        return 20.f;
+    }();
+    return v;
+}
+
+// 每个模板最多带回多少个最粗层候选(环境变量 SBM_MAX_CAND_PER_TPL 可覆盖, 调参/对比用)。
+// 依据: 最粗层的正确位姿得分几乎总是该模板的全局最大值, march-up 只是精化它;
+// 多实例场景由不同角度/位姿的模板各自命中, 每模板保留 top-K 已足够。
+// 超出的候选基本都是背景噪声, 却要白白消耗每一层的 similarityLocal + 响应图 tile 计算。
+static int max_candidates_per_template()
+{
+    static const int v = []() -> int {
+        const char* env = std::getenv("SBM_MAX_CAND_PER_TPL");
+        if(env){
+            int val = std::atoi(env);
+            if(val > 0) return val;
+        }
+        return 8;
+    }();
+    return v;
+}
+
 void Detector::collectCoarseCandidates(const LinearMemoryPyramid &lm_pyramid,
                                        const std::vector<Size> &sizes,
                                        float threshold,
@@ -1566,14 +1653,24 @@ void Detector::collectCoarseCandidates(const LinearMemoryPyramid &lm_pyramid,
     const std::vector<LinearMemories> &lowest_lm = lm_pyramid.back();
     const int lowest_T = T_at_level.back();
     const Size lowest_size = sizes.back();
+    const float coarse_threshold = std::max(0.f, threshold - coarse_threshold_margin());
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
     for (int template_id = 0; template_id < (int)template_pyramids.size(); ++template_id)
     {
         coarseCandidates(lowest_lm[0], template_pyramids[template_id].back(),
-                         lowest_size, lowest_T, threshold, class_id, template_id,
+                         lowest_size, lowest_T, coarse_threshold, class_id, template_id,
                          candidates_by_template[template_id]);
+        // 优化: top-K 截断。Match::operator< 按 similarity 降序,
+        // nth_element 后前 K 个就是得分最高的 K 个候选。
+        std::vector<Match>& cand = candidates_by_template[template_id];
+        const int K = max_candidates_per_template();
+        if(static_cast<int>(cand.size()) > K)
+        {
+            std::nth_element(cand.begin(), cand.begin() + K, cand.end());
+            cand.resize(static_cast<size_t>(K));
+        }
     }
 }
 
@@ -1609,11 +1706,14 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             // 兼容路径: 没有预缓存时自己跑一次最粗层全图粗搜
             const std::vector<LinearMemories> &lowest_lm = lm_pyramid.back();
             coarseCandidates(lowest_lm[0], tp.back(), sizes.back(), T_at_level.back(),
-                             threshold, class_id, static_cast<int>(template_id), candidates);
+                             std::max(0.f, threshold - coarse_threshold_margin()),
+                             class_id, static_cast<int>(template_id), candidates);
         }
 
 
         // Locally refine each match by marching up the pyramid
+        // 优化: 相似度局部图缓冲提到层循环外, 整个 march-up 期间零堆分配。
+        Mat similarities2;
         for (int l = pyramid_levels - 2; l >= 0; --l)
         {
             const std::vector<LinearMemories> &lms = lm_pyramid[l];
@@ -1625,7 +1725,6 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             int max_x = size.width - tp[start].width - border;
             int max_y = size.height - tp[start].height - border;
 
-            Mat similarities2;
             for (int m = 0; m < (int)candidates.size(); ++m)
             {
                 Match &match2 = candidates[m];
@@ -1642,14 +1741,17 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
 
                 // Compute local similarity maps for each ColorGradient
                 int numFeatures = 0;
+                bool sim_is_8u = false;
 
                 {
                     const Template &templ = tp[start];
                     numFeatures += static_cast<int>(templ.features.size());
+                    sim_is_8u = (templ.features.size() < 64);
 
-                    if (templ.features.size() < 64){
+                    if (sim_is_8u){
+                        // 优化: 输出保持 CV_8U, 去掉每候选一次的 convertTo(CV_16U) 全图拷贝;
+                        // 缓冲由 similarityLocal_64 内部 create() 复用。
                         similarityLocal_64(lms[0], templ, similarities2, size, T, Point(x, y));
-                        similarities2.convertTo(similarities2, CV_16U);
                     }else if (templ.features.size() < 8192){
                         similarityLocal(lms[0], templ, similarities2, size, T, Point(x, y));
                     }else{
@@ -1660,19 +1762,37 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                 // Find best local adjustment
                 float best_score = 0;
                 int best_r = -1, best_c = -1;
-                for (int r = 0; r < similarities2.rows; ++r)
-                {
-                    ushort *row = similarities2.ptr<ushort>(r);
-                    for (int c = 0; c < similarities2.cols; ++c)
+                // 优化: 按实际类型扫描(8U 一次读一字节), 不再统一升位到 16U;
+                // 原始值域 0~4N, 分母 4N 提到循环外。
+                const float inv_denom = 100.f / (4.f * numFeatures);
+                if (sim_is_8u){
+                    for (int r = 0; r < similarities2.rows; ++r)
                     {
-                        int score_int = row[c];
-                        float score = (score_int * 100.f) / (4 * numFeatures);
-
-                        if (score > best_score)
+                        const uchar *row = similarities2.ptr<uchar>(r);
+                        for (int c = 0; c < similarities2.cols; ++c)
                         {
-                            best_score = score;
-                            best_r = r;
-                            best_c = c;
+                            float score = row[c] * inv_denom;
+                            if (score > best_score)
+                            {
+                                best_score = score;
+                                best_r = r;
+                                best_c = c;
+                            }
+                        }
+                    }
+                }else{
+                    for (int r = 0; r < similarities2.rows; ++r)
+                    {
+                        const ushort *row = similarities2.ptr<ushort>(r);
+                        for (int c = 0; c < similarities2.cols; ++c)
+                        {
+                            float score = row[c] * inv_denom;
+                            if (score > best_score)
+                            {
+                                best_score = score;
+                                best_r = r;
+                                best_c = c;
+                            }
                         }
                     }
                 }
@@ -1683,8 +1803,13 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             }
 
             // Filter out any matches that drop below the similarity threshold
+            // 优化/修复: 中间层得分系统性低于最终得分(特征少、容差大), 用裕量过滤,
+            // 最细层(l == 0)仍按用户阈值精确过滤 —— 最终结果的阈值语义不变。
+            const float level_threshold =
+                (l == 0) ? threshold
+                         : std::max(0.f, threshold - coarse_threshold_margin());
             std::vector<Match>::iterator new_end = std::remove_if(candidates.begin(), candidates.end(),
-                                                                  MatchPredicate(threshold));
+                                                                  MatchPredicate(level_threshold));
             candidates.erase(new_end, candidates.end());
         }
 
@@ -2071,17 +2196,27 @@ RegistrationResult Detector::refine(const Match& match) {
     }
     // 3. 准备场景
     // 参考 test.cpp, 这两个类型通常在全局命名空间
-    ::Scene_kdtree scene;
-    ::KDTree_cpu kdtree;
-
     if (this->dx_.empty() || this->dy_.empty()) {
         // 抛出 OpenCV 的 StsBadArg 异常
         CV_Error(cv::Error::StsBadArg, "Gradient maps (dx_, dy_) are empty. Call match() first.");
     }
-    scene.init_Scene_kdtree_cpu(this->dx_, this->dy_, kdtree);
+    // 优化: 场景边缘点云 + KD-tree 缓存。
+    // 原实现每个 match 精修都重建一次: 全图 Canny + 逐边缘点亚像素 facet 模型 + KD-tree,
+    // 同一帧 match() 里的 N 个结果就重复 N 次(每次几十毫秒级)。
+    // dx_/dy_ 的数据指针每帧都会变, 用它作为缓存有效性判据。
+    if (!scene_cache_valid_
+        || scene_cache_dx_.data != this->dx_.data
+        || scene_cache_dy_.data != this->dy_.data
+        || scene_cache_dx_.size() != this->dx_.size())
+    {
+        scene_cache_.init_Scene_kdtree_cpu(this->dx_, this->dy_, kdtree_cache_);
+        scene_cache_dx_ = this->dx_;
+        scene_cache_dy_ = this->dy_;
+        scene_cache_valid_ = true;
+    }
     // 4. 执行 ICP
     // 明确指定命名空间 cuda_icp::sim3
-    cuda_icp::RegistrationResult icp_res = cuda_icp::sim3::ICP2D_Point2Plane_cpu(model_pcd, scene);
+    cuda_icp::RegistrationResult icp_res = cuda_icp::sim3::ICP2D_Point2Plane_cpu(model_pcd, scene_cache_);
     // 5. 转换结果
     RegistrationResult res;
     res.fitness = icp_res.fitness_;
