@@ -214,19 +214,59 @@ void angle_test(const std::string& mode, bool viewICP,
 
         std::cout << "test img size: " << img.rows * img.cols << std::endl << std::endl;
 
-        // 只统计 detector.match 本体; --repeat > 1 时取多次的最小值,
-        // 避开 CPU 频率波动/调度抖动带来的噪声(测性能时建议 --repeat 10)
+        // 计时口径说明:
+        //   1) 纯 match: 只统计 detector.match 本体(use_refine=false);
+        //   2) match+ICP: use_refine=true, 与 C# 端 sbm_match(use_refine=1)
+        //      同一条代码路径 —— match() 内部会对每个结果跑 ICP 精修。
+        // 重要陷阱: ICP 精修首次会在 line2Dup::refine() 里构建"场景边缘 kdtree"
+        // 缓存(全图 Canny + 亚像素 facet + KD-tree), 一次性开销约 +35ms;
+        // 之后同帧/同进程命中缓存只需几毫秒。所以下面先做一次"热身"
+        // (不计时), 让后续计时反映稳定态(稳态才与 C# 长会话内第 2 次及以后一致)。
+        // --repeat > 1 时取多次的最小值, 避开 CPU 频率波动/调度抖动(建议 --repeat 10)。
+        // 另: 若 C# 每次都在新进程里跑(调试/单次作业), 则每次都是冷启动, 直接对应
+        // 下面的第一次(match+icp, thr=90)冷值, 而非稳态值。
         std::vector<line2Dup::Match> matches;
-        double best_ms = 1e9;
-        for(int rep = 0; rep < std::max(1, repeat); rep++){
-            Timer timer;
-            auto ms_rep = detector.match(img, 90, ids);
-            double ms = timer.elapsed() * 1000.0;
-            if(ms < best_ms){ best_ms = ms; matches.swap(ms_rep); }
+        auto timed_match = [&](float thresh, bool use_refine,
+                               std::vector<line2Dup::Match>& out) -> double {
+            line2Dup::MatchParams params;
+            params.class_ids = ids;
+            params.min_confidence = thresh;
+            params.use_refine = use_refine;
+            double best = 1e9;
+            std::vector<line2Dup::Match> best_ms_rep;
+            for(int rep = 0; rep < std::max(1, repeat); rep++){
+                Timer timer;
+                auto ms_rep = detector.match(img, params);
+                double ms = timer.elapsed() * 1000.0;
+                if(ms < best){ best = ms; best_ms_rep.swap(ms_rep); }
+            }
+            out.swap(best_ms_rep);
+            return best;
+        };
+
+        // 热身: 不计入耗时, 触发场景 kdtree 冷构建, 使后续计时进入稳态
+        {
+            line2Dup::MatchParams wp;
+            wp.class_ids = ids; wp.min_confidence = 90.f; wp.use_refine = true;
+            detector.match(img, wp);
         }
-        std::cout << "match time: " << best_ms << " ms"
+
+        double ms_match_only = timed_match(90.f, false, matches);
+        std::cout << "match time (no icp, thr=90, warm): " << ms_match_only << " ms"
+                  << (repeat > 1 ? (" (min of " + std::to_string(repeat) + ")") : "")
+                  << std::endl;
+
+        double ms_match_icp90 = timed_match(90.f, true, matches);
+        std::cout << "match time (match+icp, thr=90, warm): " << ms_match_icp90 << " ms"
+                  << (repeat > 1 ? (" (min of " + std::to_string(repeat) + ")") : "")
+                  << std::endl;
+
+        double ms_match_icp75 = timed_match(75.f, true, matches);
+        std::cout << "match time (match+icp, thr=75, warm): " << ms_match_icp75 << " ms"
                   << (repeat > 1 ? (" (min of " + std::to_string(repeat) + ")") : "")
                   << std::endl << std::endl;
+
+        // 可视化沿用与 C# 最接近的口径(thr=90 + icp)的结果
 
 
         std::cout << "matches.size(): " << matches.size() << std::endl;

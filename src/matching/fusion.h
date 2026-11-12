@@ -113,6 +113,11 @@ public:
     bool have_special_headers = false;
     virtual void link_special_header(const cv::Rect& cur_roi){}
 
+    // true: 该节点直接把结果写到全局缓冲(linear memory), 不经过 out_v 的 tile 视图。
+    // process() 据此决定最后一个节点是链 out_v 还是下发全局坐标 cur_row/cur_col,
+    // 避免再用 op_name 字符串特判。
+    virtual bool writes_global_memory() const { return false; }
+
     bool use_simd = true;
     virtual void update_simple(int start_r, int start_c, int end_r, int end_c) = 0;
     virtual void update_simd(int start_r, int start_c, int end_r, int end_c) = 0;
@@ -391,14 +396,15 @@ public:
         for(int r = start_r; r < end_r; r++){
             bool is_even_row = r % 2;
             int r_down = r / 2 - padded_row / 2;
-            bool is_r_in_down_roi;
-            if(need_pyr_){
-                is_r_in_down_roi = (r_down >= 0 && r_down < out_headers[1].rows);
-            }
+            // 优化: 每行取一次下采样行指针, 取代每像素一次 Mat::at;
+            // 空指针统一表示"该行无需写 pyrdown"。
+            uint8_t* down_row = (need_pyr_ && is_even_row && r_down >= 0 && r_down < out_headers[1].rows)
+                                ? out_headers[1].ptr<uint8_t>(r_down) : nullptr;
+            const int down_cols = need_pyr_ ? out_headers[1].cols : 0;
             int c = start_c;
             int16_t *buf_ptr = out_headers[0].ptr<int16_t>(r - op_row/2, c - op_col/2);
 
-            std::vector<int32_t*> parent_buf_ptr(gauss_size);
+            int32_t* parent_buf_ptr[5];
             int32_t** parent_buf_center = &parent_buf_ptr[gauss_size/2];
             parent_buf_center[0] = in_headers[0].ptr<int32_t>(r, c);
             for(int i=1; i<=gauss_size/2; i++){
@@ -418,12 +424,10 @@ public:
                     parent_buf_ptr[i]++;
                 }
 
-                if(need_pyr_){
-                    bool is_even_col = c % 2;
+                if(down_row){
                     int c_down = c / 2 - padded_col / 2;
-                    bool is_c_in_down_roi = (c_down >= 0 && c_down < out_headers[1].cols);
-                    if(is_even_row && is_even_col && is_r_in_down_roi && is_c_in_down_roi){
-                        out_headers[1].at<uint8_t>(r_down, c_down) = uint8_t(*buf_ptr);
+                    if(c % 2 == 0 && c_down >= 0 && c_down < down_cols){
+                        down_row[c_down] = uint8_t(*buf_ptr);
                     }
                 }
 
@@ -437,14 +441,14 @@ public:
         for(int r = start_r; r < end_r; r++){
             bool is_even_row = r % 2;
             int r_down = r / 2 - padded_row / 2;
-            bool is_r_in_down_roi;
-            if(need_pyr_){
-                is_r_in_down_roi = (r_down >= 0 && r_down < out_headers[1].rows);
-            }
+            // 优化: 每行取一次下采样行指针, 取代每像素一次 Mat::at
+            uint8_t* down_row = (need_pyr_ && is_even_row && r_down >= 0 && r_down < out_headers[1].rows)
+                                ? out_headers[1].ptr<uint8_t>(r_down) : nullptr;
+            const int down_cols = need_pyr_ ? out_headers[1].cols : 0;
             int c = start_c;
             int16_t *buf_ptr = out_headers[0].ptr<int16_t>(r - op_row/2, c - op_col/2);
 
-            std::vector<int32_t*> parent_buf_ptr(gauss_size);
+            int32_t* parent_buf_ptr[5];
             int32_t** parent_buf_center = &parent_buf_ptr[gauss_size/2];
             parent_buf_center[0] = in_headers[0].ptr<int32_t>(r, c);
             for(int i=1; i<=gauss_size/2; i++){
@@ -465,21 +469,35 @@ public:
                 }
                 local_sum >>= (2*gauss_quant_bit);
 
+                // 优化: pack(local_sum, zero) 会把 16 个 int16(后 8 个为 0)全部存进 buf_ptr,
+                // 多写的 8 个 int16 由后续迭代覆盖, 白白多一倍写带宽。
+                // 这里先存到临时缓冲再 memcpy 前 8 个有效 int16(编译成单条 movdqu)。
                 mipp::Reg<int16_t> local_sum_int16 = mipp::pack<int32_t,int16_t>(local_sum, zero32_v);
-                local_sum_int16.store(buf_ptr);
+                int16_t packed16[simd_step*2];
+                local_sum_int16.store(packed16);
+                memcpy(buf_ptr, packed16, sizeof(int16_t)*simd_step);
 
                 for(int i=0; i<gauss_size; i++){
                     parent_buf_ptr[i] += simd_step;
                 }
 
-                if(need_pyr_){
-                    int16_t *buf_ptr_local = buf_ptr;
-                    for(int c_local = c; c_local < c + simd_step; c_local++, buf_ptr_local++){
-                        bool is_even_col = c_local % 2;
-                        int c_down = c_local / 2 - padded_col / 2;
-                        bool is_c_in_down_roi = (c_down >= 0 && c_down < out_headers[1].cols);
-                        if(is_even_row && is_even_col && is_r_in_down_roi && is_c_in_down_roi){
-                            out_headers[1].at<uint8_t>(r_down, c_down) = uint8_t(*buf_ptr_local);
+                if(down_row){
+                    // 向量内偶数列共 simd_step/2 个, 其下采样列号连续, 一次连续写;
+                    // 只有跨下采样边界时才逐像素回退到安全路径。
+                    const int c_first_even = (c % 2 == 0) ? c : c + 1;
+                    const int c_down0 = c_first_even / 2 - padded_col / 2;
+                    if(c_down0 >= 0 && c_down0 + simd_step/2 <= down_cols){
+                        uint8_t tmp8[simd_step];
+                        for(int k = 0; k < simd_step/2; k++)
+                            tmp8[k] = uint8_t(buf_ptr[c_first_even - c + 2*k]);
+                        memcpy(down_row + c_down0, tmp8, simd_step/2);
+                    }else{
+                        for(int c_local = c; c_local < c + simd_step; c_local++){
+                            if(c_local % 2 == 0){
+                                int c_down = c_local / 2 - padded_col / 2;
+                                if(c_down >= 0 && c_down < down_cols)
+                                    down_row[c_down] = uint8_t(buf_ptr[c_local - c]);
+                            }
                         }
                     }
                 }
@@ -497,12 +515,10 @@ public:
                     parent_buf_ptr[i]++;
                 }
 
-                if(need_pyr_){
-                    bool is_even_col = c % 2;
+                if(down_row){
                     int c_down = c / 2 - padded_col / 2;
-                    bool is_c_in_down_roi = (c_down >= 0 && c_down < out_headers[1].cols);
-                    if(is_even_row && is_even_col && is_r_in_down_roi && is_c_in_down_roi){
-                        out_headers[1].at<uint8_t>(r_down, c_down) = uint8_t(*buf_ptr);
+                    if(c % 2 == 0 && c_down >= 0 && c_down < down_cols){
+                        down_row[c_down] = uint8_t(*buf_ptr);
                     }
                 }
             }
@@ -1147,8 +1163,65 @@ public:
             }
         }
     }
+
+    // 优化: AVX2 按像素并行 —— 每个 32 位 lane 处理一个像素, 9 个邻居的贡献用
+    // sllv(1, 4*label) 直接算出("第 label 个半字节 +1"), 不再走 256 项查表。
+    // label=63(INVALID) 的移位计数 252 > 31, _mm256_sllv_epi32 恒等于 0, 天然不投票;
+    // 与标量 SWAR 结果逐位一致(同样的 4bit 半字节计数 + 0x33333333/0x88888888 判定)。
     void update_simd(int start_r, int start_c, int end_r, int end_c) override {
+#ifdef __AVX2__
+        const int simd_step = 8;   // 8 lanes = 8 像素/迭代 (256bit / 32bit)
+        if(start_c + simd_step + 1 > end_c){
+            update_simple(start_r, start_c, end_r, end_c);
+            return;
+        }
+        const __m256i ONE32 = _mm256_set1_epi32(1);
+        const __m256i MAGIC_ADD = _mm256_set1_epi32(int32_t(0x33333333u));
+        const __m256i MAGIC_MASK = _mm256_set1_epi32(int32_t(0x88888888u));
+
+        for(int r = start_r; r < end_r; r++){
+            int c = start_c;
+            const uint8_t *p_up = in_headers[0].ptr<uint8_t>(r - 1, c);
+            const uint8_t *p_md = in_headers[0].ptr<uint8_t>(r,     c);
+            const uint8_t *p_dn = in_headers[0].ptr<uint8_t>(r + 1, c);
+            uint8_t *buf_ptr = out_headers[0].ptr<uint8_t>(r - op_row/2, c - op_col/2);
+
+            for(; c <= end_c - simd_step - 1; c += simd_step, p_up += simd_step,
+                p_md += simd_step, p_dn += simd_step, buf_ptr += simd_step){
+                const uint8_t* rows_p[3] = {p_up, p_md, p_dn};
+                __m256i acc = _mm256_setzero_si256();
+                for(int row = 0; row < 3; ++row){
+                    const uint8_t* rp = rows_p[row];
+                    for(int off = -1; off <= 1; ++off){
+                        // 载入 8 个标签字节并零扩展为 8 个 dword
+                        __m128i lab8 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(rp + off));
+                        __m256i lab32 = _mm256_cvtepu8_epi32(lab8);
+                        // 贡献 = 1 << (4*label): lane 独立移位, label >= 8 时硬件恒置 0
+                        __m256i contrib = _mm256_sllv_epi32(ONE32, _mm256_slli_epi32(lab32, 2));
+                        acc = _mm256_add_epi32(acc, contrib);
+                    }
+                }
+                // 与标量一致的过半判定
+                __m256i hit = _mm256_and_si256(_mm256_add_epi32(acc, MAGIC_ADD), MAGIC_MASK);
+                // 8 个 lane 拆成标量收尾: ctz 求方向, 写回一个字节
+                alignas(32) int32_t hit_v[8];
+                _mm256_store_si256(reinterpret_cast<__m256i*>(hit_v), hit);
+                for(int k = 0; k < simd_step; k++){
+                    const uint32_t h = (uint32_t)hit_v[k];
+                    buf_ptr[k] = h ? uint8_t(uint8_t(1) << (ctz32(h) >> 2)) : uint8_t(0);
+                }
+            }
+            for(; c < end_c; c++, buf_ptr++, p_up++, p_md++, p_dn++){
+                uint32_t acc = inc_[p_up[-1]] + inc_[p_up[0]] + inc_[p_up[1]]
+                             + inc_[p_md[-1]] + inc_[p_md[0]] + inc_[p_md[1]]
+                             + inc_[p_dn[-1]] + inc_[p_dn[0]] + inc_[p_dn[1]];
+                const uint32_t hit = (acc + 0x33333333u) & 0x88888888u;
+                *buf_ptr = hit ? uint8_t(uint8_t(1) << (ctz32(hit) >> 2)) : uint8_t(0);
+            }
+        }
+#else
         update_simple(start_r, start_c, end_r, end_c);
+#endif
     }
     std::shared_ptr<FilterNode> clone() const override {
         std::shared_ptr<FilterNode> node_new = std::make_shared<Hist3x3Node_8U_8U>();
@@ -1449,6 +1522,7 @@ public:
     void update_simd(int start_r, int start_c, int end_r, int end_c) override {
         update_simple(start_r, start_c, end_r, end_c);
     }
+    bool writes_global_memory() const override { return true; }
     std::shared_ptr<FilterNode> clone() const override {
         std::shared_ptr<FilterNode> node_new = std::make_shared<LinearizeTxTNode_8U_8U>(cur_T, imgCols, buffer_);
         node_new->padded_row = padded_row;
@@ -1460,6 +1534,105 @@ public:
     int imgCols;
     int linearize_row_step;
     std::vector<cv::Mat> buffer_;
+};
+
+// Response1x1 + LinearizeTxT 的融合节点: 读 spread 后的 one-hot 标签图,
+// 每个像素直接算出 8 个方向的响应值并写入 linear memory。
+// 与两节点级联数值完全一致(同样的判定、同样的写入地址), 但省掉了
+// 8 张全尺寸响应图平面的整图写 + 整图读 —— 对全图 L0 后缀链(大模板场景的最大耗时项)
+// 是纯收益; ROI 模式下同样按 tile 生效。
+class ResponseLinearizeTxTNode_8U_8U : public FilterNode {
+public:
+    ResponseLinearizeTxTNode_8U_8U(int cur_T_temp, int imgCols_temp, std::vector<cv::Mat> buffer)
+        : buffer_(buffer),
+          FilterNode("respLinearizeTxT", CV_8U, 1, CV_8U, 8, 1, 1),
+          cur_T(cur_T_temp), imgCols(imgCols_temp){
+        linearize_row_step = imgCols / cur_T;
+        have_special_headers = true;
+    }
+
+    void link_special_header(const cv::Rect &cur_roi) override {
+        out_headers.clear();
+        for(int ori=0; ori<8; ori++){
+            out_headers.push_back(buffer_[ori]);
+        }
+    }
+
+    void update_simple(int start_r, int start_c, int end_r, int end_c) override {
+        // 线性化地址推进逻辑与 LinearizeTxTNode 完全一致:
+        // 像素 (r,c) -> lm 行 = cur_T*(r%cur_T) + c%cur_T, 列 = (r/cur_T)*row_step + c/cur_T。
+        // 关键差异: 旧实现按方向外层循环, spread 平面被重复读 8 遍(每方向一遍);
+        // 这里按相位外层循环, spread 每像素只读 1 次, 同时算出 8 个方向的响应并写 8 份 lm。
+        assert(start_c % cur_T == 0);
+        assert(cur_col % cur_T == 0);
+        int global_start_r = start_r + cur_row;
+        int global_start_c = start_c + cur_col;
+
+        // 首个相位(tileT_r=start_r, tileT_c=start_c)的写起点, 之后每相位行号 +1,
+        // 满 T*T 回绕一次、列号 +row_step —— 与 LinearizeTxTNode 的递推逐位一致。
+        int target_c = linearize_row_step * (global_start_r / cur_T) + global_start_c / cur_T;
+        int target_r = cur_T * (global_start_r % cur_T) + global_start_c % cur_T;
+
+        for(int tileT_r = start_r; tileT_r < start_r + cur_T; ++tileT_r){
+            for (int tileT_c = start_c; tileT_c < start_c + cur_T; ++tileT_c){
+                uint8_t* mem[8];
+                for(int ori = 0; ori < 8; ++ori)
+                    mem[ori] = out_headers[ori].ptr<uint8_t>(target_r, target_c);
+
+                for(int r = tileT_r; r < end_r; r += cur_T){
+                    const uint8_t *src = in_headers[0].ptr<uint8_t>(r);
+                    uint8_t* m0 = mem[0]; uint8_t* m1 = mem[1]; uint8_t* m2 = mem[2]; uint8_t* m3 = mem[3];
+                    uint8_t* m4 = mem[4]; uint8_t* m5 = mem[5]; uint8_t* m6 = mem[6]; uint8_t* m7 = mem[7];
+                    for (int c = tileT_c; c < end_c; c += cur_T){
+                        const uint8_t v = src[c];
+                        *m0 = (hit_mask[0] & v) ? scores[0] : ((side_mask[0] & v) ? scores[1] : uint8_t(0));
+                        *m1 = (hit_mask[1] & v) ? scores[0] : ((side_mask[1] & v) ? scores[1] : uint8_t(0));
+                        *m2 = (hit_mask[2] & v) ? scores[0] : ((side_mask[2] & v) ? scores[1] : uint8_t(0));
+                        *m3 = (hit_mask[3] & v) ? scores[0] : ((side_mask[3] & v) ? scores[1] : uint8_t(0));
+                        *m4 = (hit_mask[4] & v) ? scores[0] : ((side_mask[4] & v) ? scores[1] : uint8_t(0));
+                        *m5 = (hit_mask[5] & v) ? scores[0] : ((side_mask[5] & v) ? scores[1] : uint8_t(0));
+                        *m6 = (hit_mask[6] & v) ? scores[0] : ((side_mask[6] & v) ? scores[1] : uint8_t(0));
+                        *m7 = (hit_mask[7] & v) ? scores[0] : ((side_mask[7] & v) ? scores[1] : uint8_t(0));
+                        ++m0; ++m1; ++m2; ++m3; ++m4; ++m5; ++m6; ++m7;
+                    }
+                    // 该块行结束: 8 张 lm 的写指针各推进一个块行(row_step), 与旧实现一致
+                    mem[0] += linearize_row_step; mem[1] += linearize_row_step;
+                    mem[2] += linearize_row_step; mem[3] += linearize_row_step;
+                    mem[4] += linearize_row_step; mem[5] += linearize_row_step;
+                    mem[6] += linearize_row_step; mem[7] += linearize_row_step;
+                }
+
+                // 相位推进(与 LinearizeTxTNode 相同的递推)
+                target_r++;
+                if(target_r >= cur_T * cur_T){
+                    target_r -= cur_T * cur_T;
+                    target_c += linearize_row_step;
+                }
+            }
+        }
+    }
+
+    void update_simd(int start_r, int start_c, int end_r, int end_c) override {
+        // 写入地址按 T 网格离散跳转, 向量化收益有限, 暂走标量路径。
+        update_simple(start_r, start_c, end_r, end_c);
+    }
+
+    bool writes_global_memory() const override { return true; }
+
+    std::shared_ptr<FilterNode> clone() const override {
+        std::shared_ptr<FilterNode> node_new = std::make_shared<ResponseLinearizeTxTNode_8U_8U>(cur_T, imgCols, buffer_);
+        node_new->padded_row = padded_row;
+        node_new->padded_col = padded_col;
+        node_new->which_buffer = which_buffer;
+        return node_new;
+    }
+    int cur_T;
+    int imgCols;
+    int linearize_row_step;
+    std::vector<cv::Mat> buffer_;
+    const uint8_t scores[2] = {4, 3};
+    const uint8_t hit_mask[8] = { 1,   2, 4,  8,  16, 32, 64,  128};
+    const uint8_t side_mask[8] = {130, 5, 10, 20, 40, 80, 160, 65};
 };
 
 class ProcessManager {
@@ -1705,7 +1878,7 @@ std::string omp_profile_str;
             }
         }
         { // link last out to out_v
-            if(nodes_private.back()->op_name != "linearizeTxT"){ // linearize is a very special operations
+            if(!nodes_private.back()->writes_global_memory()){ // linearize 类节点直接写全局缓冲, 见 writes_global_memory()
                 nodes_private.back()->out_headers.clear();
                 for(auto& out_ori: out_v){
                     cv::Mat out = out_ori(cur_roi);

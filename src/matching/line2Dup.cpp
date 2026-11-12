@@ -1152,6 +1152,7 @@ static void appendPrefixNodes(simple_fusion::ProcessManager& manager,
 
 // fusion 链的后缀: 幅值/方向量化 -> 3x3 投票 -> spread -> 8 方向响应图 -> linearize。
 // 这是每层最贵的一段, 而且只有 16x16 局部精化会读它, 因此可以只算候选邻域覆盖的 tile。
+// Response+Linearize 已合并为单个融合节点(数值不变), 省掉 8 张响应图平面的整图读写。
 static void appendSuffixNodes(simple_fusion::ProcessManager& manager, int mag_thresh_l2,
                               int cur_T, int imgCols, const std::vector<Mat>& lm)
 {
@@ -1160,8 +1161,7 @@ static void appendSuffixNodes(simple_fusion::ProcessManager& manager, int mag_th
     nodes.push_back(std::make_shared<simple_fusion::Hist3x3Node_8U_8U>());
     nodes.push_back(std::make_shared<simple_fusion::Spread1xnNode_8U_8U>(cur_T + 1));
     nodes.push_back(std::make_shared<simple_fusion::Spreadnx1Node_8U_8U>(cur_T + 1));
-    nodes.push_back(std::make_shared<simple_fusion::Response1x1Node_8U_8U>());
-    nodes.push_back(std::make_shared<simple_fusion::LinearizeTxTNode_8U_8U>(cur_T, imgCols, lm));
+    nodes.push_back(std::make_shared<simple_fusion::ResponseLinearizeTxTNode_8U_8U>(cur_T, imgCols, lm));
 }
 
 // 单个模板在最粗层的全图粗搜。matchClass 与 collectCoarseCandidates 共用。
@@ -1379,6 +1379,25 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
         collectCoarseCandidates(lm_pyramid, sizes, threshold, works[i].class_id,
                                 *works[i].template_pyramids, works[i].candidates);
 
+#ifdef DEBUG_MATCH_TIME
+    timer.out("coarse candidate search");
+#endif
+    if (roi_verbose()){
+        for (size_t i = 0; i < works.size(); ++i){
+            size_t total = 0, alive_tpl = 0;
+            float best = 0.f;
+            const auto& cands = works[i].candidates;
+            for (size_t t = 0; t < cands.size(); ++t){
+                if(!cands[t].empty()) ++alive_tpl;
+                total += cands[t].size();
+                for (size_t m = 0; m < cands[t].size(); ++m)
+                    best = std::max(best, cands[t][m].similarity);
+            }
+            fprintf(stderr, "[cand] class=%s templates=%zu alive=%zu candidates=%zu best=%.2f\n",
+                    works[i].class_id.c_str(), cands.size(), alive_tpl, total, best);
+        }
+    }
+
     // ---- 阶段 4: 逐层按候选覆盖的 tile 计算细层响应图。
     // 只写活跃 tile, 其余位置保持 0; similarityLocal 只会读到矩形内的位置。
     const bool use_roi = enable_roi_response_map && roi_response_map_enabled() && levels > 1;
@@ -1394,9 +1413,6 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
                                            (*work.template_pyramids)[tid][l], regions);
             }
         }
-        // 细层只写部分 tile, 先清零; 全图模式会写满, 清零同样安全。
-        for (int ori = 0; ori < 8; ++ori)
-            lm_pyramid[l][0][ori].setTo(0);
 
         // 一个候选都没有时, 这一层的响应图完全用不上, 直接跳过流水线。
         if (use_roi && regions.empty()) continue;
@@ -1404,20 +1420,27 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
         simple_fusion::ProcessManager manager(fusion_buffers, tileRows, tileCols);
         manager.set_num_threads(num_threads_);
         appendSuffixNodes(manager, mag_thresh_l2, T_at_level[l], sizes[l].width, lm_pyramid[l][0]);
+        bool full_image = !use_roi;
         if (use_roi){
             manager.arrange(sizes[l].height, sizes[l].width, regions);
             const int active = manager.num_update_rois();
             const int total = manager.num_total_rois();
             // 候选铺满全图时裁剪只剩额外开销, 退回整幅图计算。
-            const bool fallback = (active * 100 >= total * 85);
-            if (fallback)
+            full_image = (active * 100 >= total * 85);
+            if (full_image)
                 manager.arrange(sizes[l].height, sizes[l].width);
             if (roi_verbose())
                 std::cout << "[roi] level " << l << ": tiles " << active << "/" << total
                           << " (" << (total ? active * 100 / total : 0) << "%), regions "
-                          << regions.size() << (fallback ? " -> full image" : "") << std::endl;
+                          << regions.size() << (full_image ? " -> full image" : "") << std::endl;
         }else{
             manager.arrange(sizes[l].height, sizes[l].width);
+        }
+        // 细层只写部分 tile 时先清零, 未命中的 tile 保持 0;
+        // 全图模式每个 lm 字节都会被 linearize 重写, 跨帧缓冲里的旧数据不会残留, 可省掉清零。
+        if (!full_image){
+            for (int ori = 0; ori < 8; ++ori)
+                lm_pyramid[l][0][ori].setTo(0);
         }
         manager.process({sobel_a[l], sobel_b[l]}, lm_pyramid[l][0]);
     }
