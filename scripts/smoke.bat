@@ -43,5 +43,9 @@ if not "%RUN_RC%"=="0" (
     exit /b 1
 )
 
+REM 5) optional ABI contract check - no-op when consumer paths are unconfigured
+if exist "%SCRIPT_DIR%check_abi.bat" call "%SCRIPT_DIR%check_abi.bat"
+if errorlevel 1 exit /b 1
+
 echo [PASS] smoke: shape_based_matching_test completed cleanly
 exit /b 0

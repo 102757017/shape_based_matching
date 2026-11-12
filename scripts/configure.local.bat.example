@@ -7,6 +7,13 @@ REM         (configure.local.bat is git-ignored).
 REM
 REM The values below are EXAMPLES from dev machine A, for format reference only:
 REM ============================================================================
-set "OpenCV_DIR=E:/ToolChain/opencv4/build"
+set "OpenCV_DIR=E:/ToolChain/opencv4_13/build"
 set "EIGEN3_ROOT=E:/ToolChain/eigen-3.4.0"
 set "PYTHON_EXECUTABLE=E:/python311/python.exe"
+
+REM consumer-side ABI check config (machine-specific, optional).
+REM Fill these in only if you deploy to / consume from a C# project on this machine.
+REM SBM_CONSUMER_LIBS: folder with the deployed DLL + opencv_world4XXX.dll.
+REM SBM_CONSUMER_CS: the C# P/Invoke wrapper (MatcherNative.cs) for export diff.
+REM set "SBM_CONSUMER_LIBS=E:/C_Sharp/robot_vision/libs"
+REM set "SBM_CONSUMER_CS=E:/C_Sharp/robot_vision/Robot_Vision/VisModel/Models/ShapeBasedMatching/MatcherNative.cs"

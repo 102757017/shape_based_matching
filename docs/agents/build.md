@@ -47,6 +47,14 @@ scripts\build.bat
 3. **`SBM_SIMD_LEVEL` 默认 `AVX2`**（针对本机 i5-8250U）：若目标机器 CPU 不支持
    AVX2，运行期可能 `SIGILL`。这种机器 configure 时追加 `-DSBM_SIMD_LEVEL=SSE2`
    （或 `NONE` 退回 SSE2 基线）。
+4. **编出的 DLL 与消费端 OpenCV 版本必须一致**（最容易在"换机器重编后部署"时踩）：
+   链接期就把 `opencv_world4XXX.dll` 版本写死进 DLL；C# 工程部署目录里必须放**同一
+   版本**的运行时，否则加载即报"找不到指定的模块" / `DllNotFoundException`。**唯一
+   的版本真相源是本机 `scripts/configure.local.bat` 的 `OpenCV_DIR`**——它指向哪个
+   OpenCV `build`，编出的 DLL 就绑定哪个 world 版本。换版本 = 改 `OpenCV_DIR` 后清
+   `build/` 重配重编。C 侧 ↔ C# 侧的完整 ABI 契约（导出名 / 结构体 / 调用约定 / 位数）
+   及消费端路径的"每台机器不同"配置，见 `docs/agents/consumer.md`；换完版本跑
+   `scripts/check_abi.bat`（已挂在 `smoke.bat` 末尾）即可自动校验。
 
 ## 四、本地偏离上游的改动（换机器 / 拉取上游时需留意）
 
@@ -58,10 +66,15 @@ scripts\build.bat
 ## 五、本机（开发机 A）示例路径（仅作格式参考，非通用值）
 
 ```
-OpenCV_DIR        = E:/ToolChain/opencv4/build      (OpenCV 4.10)
+OpenCV_DIR        = E:/ToolChain/opencv4_13/build   (OpenCV 4.13.0；版本随本机 configure.local.bat 而定，勿据此判断版本)
 EIGEN3_ROOT       = E:/ToolChain/eigen-3.4.0        (Eigen 3.4.0, header-only)
 PYTHON_EXECUTABLE = E:/python311/python.exe         (Python 3.11 + numpy + pybind11)
 ```
+
+> OpenCV 版本**不要**写死判断：它取决于你本机 `configure.local.bat` 里的 `OpenCV_DIR`。
+> 上面 4.13.0 是当前开发机的取值；换机器/换版本以你自己的 `configure.local.bat` 为准。
+> 编出的 DLL 链接哪个 `opencv_world4XXX.dll` 由它决定，必须与消费端运行时一致
+> （见 `docs/agents/consumer.md`）。
 
 > 早期会话里临时放在 `E:/ToolChain/configure_sbm.bat`、`build_sbm.bat` 的脚本已被
 > 本仓库的 `scripts/configure.bat`、`scripts/build.bat` 取代，请改用后者。
