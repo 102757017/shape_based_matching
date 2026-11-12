@@ -1,7 +1,7 @@
 // bench_json —— JSON 配置驱动的模板匹配基准测试
 //
 // 用法:
-//   bench_json --config bench.json [--repeat 10] [--warmup 2] [--out result.png]
+//   bench_json --config bench/bench.json [--repeat 10] [--warmup 2] [--out result.png]
 //
 // JSON 配置(与 MatcherCore 语义对齐, 字段均可省略, 省略用默认值):
 // {
@@ -135,7 +135,7 @@ static Config parseConfig(const std::string& json_text) {
 }
 
 int main(int argc, char** argv) {
-    std::string configPath = "bench.json";
+    std::string configPath = "bench/bench.json";
     int repeat = 10, warmup = 2;
     std::string outPath;
     for (int i = 1; i < argc; ++i) {

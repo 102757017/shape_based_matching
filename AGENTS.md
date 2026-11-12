@@ -23,3 +23,8 @@
 ## 构建环境
 
 本仓库依赖 VS（MSVC）、OpenCV、Eigen、Python；各机器路径不同，故**不写死绝对路径**：VS/cmake/ninja 由 `vswhere` 自动定位，依赖位置由各机器通过环境变量或 `scripts/configure.local.bat`（git 忽略）注入。可移植构建命令、关键坑（OpenCV_RUNTIME=vc16、USE_CUDA 默认 OFF、SBM_SIMD_LEVEL 跨机器注意）、本地偏离项见 `docs/agents/build.md`。
+
+## 报告与文档指针
+
+- `OPTIMIZATION_REPORT.md`（根目录，本文件即指针）→ `docs/OPTIMIZATION_REPORT.md`：性能优化结论、加速比、已修复缺陷根因、bench_json 与 `SBM_*` 环境变量用法。**触发：性能 / 回归 / 缺陷根因相关时查阅。**
+- 基准配置已集中到 `bench/`（`bench/bench.json` 等），由 `apps/matching/bench_json.cpp` 读取。
